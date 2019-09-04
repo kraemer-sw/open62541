@@ -31,6 +31,8 @@ activateSession_default(UA_Server *server, UA_AccessControl *ac,
                         const UA_EndpointDescription *endpointDescription,
                         const UA_ByteString *secureChannelRemoteCertificate,
                         const UA_NodeId *sessionId,
+                        const size_t *localeIdsSize,
+                        const UA_String *localeIds,
                         const UA_ExtensionObject *userIdentityToken,
                         void **sessionContext) {
     AccessControlContext *context = (AccessControlContext*)ac->context;

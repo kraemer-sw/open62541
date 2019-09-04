@@ -40,6 +40,8 @@ struct UA_AccessControl {
                                      const UA_EndpointDescription *endpointDescription,
                                      const UA_ByteString *secureChannelRemoteCertificate,
                                      const UA_NodeId *sessionId,
+                                     const size_t *localeIdsSize,
+                                     const UA_String *localeIds,
                                      const UA_ExtensionObject *userIdentityToken,
                                      void **sessionContext);
 

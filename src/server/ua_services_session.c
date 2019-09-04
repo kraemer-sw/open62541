@@ -479,6 +479,8 @@ Service_ActivateSession(UA_Server *server, UA_SecureChannel *channel,
         server->config.accessControl.activateSession(server, &server->config.accessControl,
                                                      ed, &channel->remoteCertificate,
                                                      &session->sessionId,
+                                                     &request->localeIdsSize,
+                                                     request->localeIds,
                                                      &request->userIdentityToken,
                                                      &session->sessionHandle);
     if(response->responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
