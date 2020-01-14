@@ -18,7 +18,6 @@
 #include <open62541/types.h>
 #include <open62541/util.h>
 
-
 #include <mbedtls/aes.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/entropy_poll.h>
@@ -138,6 +137,12 @@ asym_decrypt_sp_basic256(const UA_SecurityPolicy *securityPolicy,
         return UA_STATUSCODE_BADINTERNALERROR;
     return mbedtls_decrypt_rsaOaep(&cc->policyContext->localPrivateKey,
                                    &cc->policyContext->drbgContext, data);
+}
+
+static size_t
+asym_getLocalEncryptionKeyLength_sp_basic256(const UA_SecurityPolicy *securityPolicy,
+                                                  const Basic256_ChannelContext *cc) {
+    return mbedtls_pk_get_len(&cc->policyContext->localPrivateKey) * 8;
 }
 
 static size_t
@@ -527,14 +532,14 @@ channelContext_compareCertificate_sp_basic256(const Basic256_ChannelContext *cc,
 }
 
 static void
-deleteMembers_sp_basic256(UA_SecurityPolicy *securityPolicy) {
+clear_sp_basic256(UA_SecurityPolicy *securityPolicy) {
     if(securityPolicy == NULL)
         return;
 
+    UA_ByteString_deleteMembers(&securityPolicy->localCertificate);
+
     if(securityPolicy->policyContext == NULL)
         return;
-
-    UA_ByteString_deleteMembers(&securityPolicy->localCertificate);
 
     /* delete all allocated members in the context */
     Basic256_PolicyContext *pc = (Basic256_PolicyContext *)
@@ -599,7 +604,7 @@ updateCertificateAndPrivateKey_sp_basic256(UA_SecurityPolicy *securityPolicy,
     UA_LOG_ERROR(securityPolicy->logger, UA_LOGCATEGORY_SECURITYPOLICY,
                  "Could not update certificate and private key");
     if(securityPolicy->policyContext != NULL)
-        deleteMembers_sp_basic256(securityPolicy);
+        clear_sp_basic256(securityPolicy);
     return retval;
 }
 
@@ -642,7 +647,7 @@ policyContext_newContext_sp_basic256(UA_SecurityPolicy *securityPolicy,
 
     /* Add the system entropy source */
     mbedErr = mbedtls_entropy_add_source(&pc->entropyContext,
-                                         mbedtls_platform_entropy_poll, NULL, 0,
+                                         MBEDTLS_ENTROPY_POLL_METHOD, NULL, 0,
                                          MBEDTLS_ENTROPY_SOURCE_STRONG);
     if(mbedErr) {
         retval = UA_STATUSCODE_BADSECURITYCHECKSFAILED;
@@ -683,7 +688,7 @@ error:
     UA_LOG_ERROR(securityPolicy->logger, UA_LOGCATEGORY_SECURITYPOLICY,
                  "Could not create securityContext: %s", UA_StatusCode_name(retval));
     if(securityPolicy->policyContext != NULL)
-        deleteMembers_sp_basic256(securityPolicy);
+        clear_sp_basic256(securityPolicy);
     return retval;
 }
 
@@ -737,7 +742,8 @@ UA_SecurityPolicy_Basic256(UA_SecurityPolicy *policy,
     asym_encryptionAlgorithm->decrypt =
         (UA_StatusCode(*)(const UA_SecurityPolicy *, void *, UA_ByteString *))
             asym_decrypt_sp_basic256;
-    asym_encryptionAlgorithm->getLocalKeyLength = NULL; // TODO: Write function
+    asym_encryptionAlgorithm->getLocalKeyLength =
+        (size_t (*)(const UA_SecurityPolicy *, const void *))asym_getLocalEncryptionKeyLength_sp_basic256;
     asym_encryptionAlgorithm->getRemoteKeyLength =
         (size_t (*)(const UA_SecurityPolicy *, const void *))asym_getRemoteEncryptionKeyLength_sp_basic256;
     asym_encryptionAlgorithm->getLocalBlockSize = NULL; // TODO: Write function
@@ -819,9 +825,13 @@ UA_SecurityPolicy_Basic256(UA_SecurityPolicy *policy,
         channelContext_compareCertificate_sp_basic256;
 
     policy->updateCertificateAndPrivateKey = updateCertificateAndPrivateKey_sp_basic256;
-    policy->deleteMembers = deleteMembers_sp_basic256;
+    policy->clear = clear_sp_basic256;
 
-    return policyContext_newContext_sp_basic256(policy, localPrivateKey);
+    UA_StatusCode res = policyContext_newContext_sp_basic256(policy, localPrivateKey);
+    if(res != UA_STATUSCODE_GOOD)
+        clear_sp_basic256(policy);
+
+    return res;
 }
 
 #endif

@@ -87,6 +87,9 @@ add_example(tutorial_server_object tutorial_server_object.c)
 
 if(UA_ENABLE_METHODCALLS)
     add_example(tutorial_server_method tutorial_server_method.c)
+    if (UA_MULTITHREADING EQUAL 100)
+        add_example(tutorial_server_method_async tutorial_server_method_async.c)
+    endif()
 endif()
 
 add_example(tutorial_client_firststeps tutorial_client_firststeps.c)
@@ -94,7 +97,10 @@ add_example(tutorial_client_firststeps tutorial_client_firststeps.c)
 add_example(tutorial_client_events tutorial_client_events.c)
 
 if(UA_ENABLE_SUBSCRIPTIONS_EVENTS)
-    add_example(tutorial_server_events tutorial_server_events.c)
+  add_example(tutorial_server_events tutorial_server_events.c)
+  if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
+    add_example(tutorial_server_alarms_conditions tutorial_server_alarms_conditions.c)
+  endif()
 endif()
 
 ##################
@@ -124,6 +130,12 @@ install(PROGRAMS $<TARGET_FILE:client>
         RENAME ua_client)
 
 add_example(client_async client_async.c)
+
+if(UA_ENABLE_METHODCALLS)
+    if (UA_MULTITHREADING EQUAL 100)
+        add_example(client_method_async client_method_async.c)
+    endif()
+endif()
 
 add_example(client_connect_loop client_connect_loop.c)
 
@@ -183,10 +195,18 @@ add_subdirectory(nodeset)
 if(UA_ENABLE_PUBSUB)
     add_example(tutorial_pubsub_connection pubsub/tutorial_pubsub_connection.c)
     add_example(tutorial_pubsub_publish pubsub/tutorial_pubsub_publish.c)
+	add_example(server_pubsub_publisher_iop pubsub/server_pubsub_publisher_iop.c)
+	add_example(server_pubsub_publish_rt_level pubsub/server_pubsub_publisher_rt_level.c)
     if(UA_ENABLE_AMALGAMATION)
         message(WARNING "PubSub subscriber tutorial (preview) can not be used with AMALGAMATION. Skipping tutorial_pubsub_subscribe.")
     else(NOT UA_ENABLE_AMALGAMATION)
         add_example(tutorial_pubsub_subscribe pubsub/tutorial_pubsub_subscribe.c)
         add_example(pubsub_subscribe_standalone pubsub/pubsub_subscribe_standalone.c)
+    endif()
+    if(UA_ENABLE_PUBSUB_MQTT)
+        if(NOT WIN32)
+            include_directories(${PROJECT_SOURCE_DIR}/../plugins)
+            add_example(tutorial_pubsub_mqtt_publish pubsub/tutorial_pubsub_mqtt_publish.c)
+        endif()
     endif()
 endif()

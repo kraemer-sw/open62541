@@ -2,7 +2,7 @@
 
 open62541 (<http://open62541.org>) is an open source and free implementation of OPC UA (OPC Unified Architecture) written in the common subset of the C99 and C++98 languages. The library is usable with all major compilers and provides the necessary tools to implement dedicated OPC UA clients and servers, or to integrate OPC UA-based communication into existing applications. open62541 library is platform independent. All platform-specific functionality is implemented via exchangeable plugins. Plugin implementations are provided for the major operating systems.
 
-open62541 is licensed under the Mozilla Public License v2.0. So the *open62541 library can be used in projects that are not open source*. Only changes to the open62541 library itself need to published under the same license. The plugins, as well as the server and client examples are in the public domain (CC0 license). They can be reused under any license and changes do not have to be published.
+open62541 is licensed under the Mozilla Public License v2.0 (MPLv2). This allows the open62541 library to be combined and distributed with any proprietary software. Only changes to the open62541 library itself need to be licensed under the MPLv2 when copied and distributed. The plugins, as well as the server and client examples are in the public domain (CC0 license). They can be reused under any license and changes do not have to be published.
 
 The library is [available](https://github.com/open62541/open62541/releases) in standard source and binary form. In addition, the single-file source distribution merges the entire library into a single .c and .h file that can be easily added to existing projects. Example server and client implementations can be found in the [/examples](examples/) directory or further down on this page.
 
@@ -17,6 +17,7 @@ Build Status:
 
 Code Quality:
 
+[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/open62541.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:open62541)
 [![Codacy Badge](https://api.codacy.com/project/badge/Grade/68ad08e897624c77a64fc2be66ca7b50)](https://www.codacy.com/app/open62541/open62541?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=open62541/open62541&amp;utm_campaign=Badge_Grade)
 [![Total Alerts](https://img.shields.io/lgtm/alerts/g/open62541/open62541.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/open62541/open62541/alerts)
 [![Coverage Status](https://img.shields.io/coveralls/open62541/open62541/master.svg)](https://coveralls.io/r/open62541/open62541?branch=master)
@@ -53,13 +54,26 @@ open62541 implements the OPC UA binary protocol stack as well as a client and se
   - UADP Binary protocol with UDP-multicast or Ethernet communication
   - PubSub JSON encoding
 
-open62541 is currently self-certifying. That is, the Conformance Testing Tools (CTT) of the OPC Foundation are regularly applied. But the SDK has not started an official certification so far.
+### Official Certification
+
+The sample server (server_ctt) built using open62541 v1.0 is in conformance with the 'Micro Embedded Device Server' Profile of OPC Foundation supporting OPC UA client/server communication, subscriptions, method calls and security (encryption) with the security policies 'Basic128Rsa15', 'Basic256' and 'Basic256Sha256' and the facets 'method server' and 'node management'. See https://open62541.org/certified-sdk for more details.
+
+PubSub (UADP) is implemented in open62541. But the feature cannot be certified at this point in time (Sep-2019) due to the lack of official test cases and testing tools.
+
+During development, the Conformance Testing Tools (CTT) of the OPC Foundation are regularly applied.
 The CTT configuration and results are tracked at https://github.com/open62541/open62541-ctt. The OPC UA profiles under regular test in the CTT are currently:
 
 - Micro Embedded Device Server
 - Method Server Facet
+- Node Management Facet
+- Security Policies
+  - Basic128Rsa15
+  - Basic256
+  - Basic256Sha256
+- User Tokens
+  - Anonymous Facet
+  - User Name Password Server Facet
 
-The goal for the upcoming 0.4 release is to support the *Embedded UA Server* profile in the CTT.
 See the page on [open62541 Features](FEATURES.md) for an in-depth look at the support for the conformance units that make up the OPC UA profiles.
   
 ### Dependencies
@@ -69,6 +83,12 @@ On most systems, open62541 requires the C standard library only. For dependencie
 - Core Library: The core library has no dependencies besides the C99 standard headers.
 - Default Plugins: The default plugins use the POSIX interfaces for networking and accessing the system clock. Ports to different (embedded) architectures are achieved by customizing the plugins.
 - Building and Code Generation: The build environment is generated via CMake. Some code is auto-generated from XML definitions that are part of the OPC UA standard. The code generation scripts run with both Python 2 and 3.
+
+**Note:**
+Specific optional features are dependent on third-party libraries. These are all listed under the `deps/` folder.
+Depending on the selected feature set, some of these libraries will be included in the resulting library.
+
+More information on the third-party libraries can be found in the corresponding [deps/README.md](deps/README.md)
 
 ### Code Quality
 
@@ -101,6 +121,12 @@ Jointly with the overall open62541 community, the core maintainers steer the lon
 - Florian Palm (RWTH Aachen University, Chair of Process Control Engineering)
 - Julius Pfrommer (Fraunhofer IOSB, Karlsruhe)
 - Stefan Profanter (fortiss, Munich)
+
+### Docker container
+
+Official docker container builds are available on [Docker Cloud](https://cloud.docker.com/u/open62541/repository/registry-1.docker.io/open62541/open62541)
+
+More information can be found in the [Docker README](docker/README.md)
 
 ## Support & Development
 
@@ -210,6 +236,7 @@ int main(int argc, char** argv)
 #include <stdio.h>
 #include <open62541/client.h>
 #include <open62541/client_config_default.h>
+#include <open62541/client_highlevel.h>
 
 int main(int argc, char *argv[])
 {

@@ -1,20 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-###
-### Author:  Chris Iatrou (ichrispa@core-vector.net)
-### Version: rev 13
-###
-### This program was created for educational purposes and has been
-### contributed to the open62541 project by the author. All licensing
-### terms for this source is inherited by the terms and conditions
-### specified for by the open62541 project (see the projects readme
-### file for more information on the LGPL terms and restrictions).
-###
-### This program is not meant to be used in a production environment. The
-### author is not liable for any complications arising due to the use of
-### this program.
-###
+### This Source Code Form is subject to the terms of the Mozilla Public
+### License, v. 2.0. If a copy of the MPL was not distributed with this
+### file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+###    Copyright 2014-2015 (c) TU-Dresden (Author: Chris Iatrou)
+###    Copyright 2014-2017 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
+###    Copyright 2016-2017 (c) Stefan Profanter, fortiss GmbH
+###    Copyright 2019 (c) Andrea Minosu
+###    Copyright 2018 (c) Jannis Volker
+###    Copyright 2018 (c) Ralph Lange
 
 from nodes import *
 from backend_open62541_datatypes import *
@@ -140,6 +136,9 @@ def setNodeValueRankRecursive(node, nodeset):
             # Default value
             node.valueRank = -1
     else:
+        if node.parent is None:
+            raise RuntimeError("Node {}: does not have a parent. Probably the parent node was blacklisted?".format(str(node.id)))
+
         # Check if parent node limits the value rank
         setNodeValueRankRecursive(node.parent, nodeset)
 
@@ -212,7 +211,8 @@ def generateCommonVariableCode(node, nodeset):
                     code.append("attr.value.arrayDimensionsSize = attr.arrayDimensionsSize;")
                     code.append("attr.value.arrayDimensions = attr.arrayDimensions;")
     elif node.value is not None:
-        raise RuntimeError("Cannot encode dataTypeNode: " + dataTypeNode.browseName.name + " for value of node " + node.browseName.name + " " + str(node.id))
+        code.append("/* Cannot encode the value */")
+        logger.warn("Cannot encode dataTypeNode: " + dataTypeNode.browseName.name + " for value of node " + node.browseName.name + " " + str(node.id))
 
     return [code, codeCleanup, codeGlobal]
 
@@ -259,7 +259,6 @@ def generateExtensionObjectSubtypeCode(node, parent, nodeset, global_var_code, i
     codeCleanup = [""]
 
     logger.debug("Building extensionObject for " + str(parent.id))
-    logger.debug("Value    " + str(node.value))
     logger.debug("Encoding " + str(node.encodingRule))
 
     typeBrowseNode = makeCIdentifier(nodeset.getDataTypeNode(parent.dataType).browseName.name)
@@ -283,10 +282,11 @@ def generateExtensionObjectSubtypeCode(node, parent, nodeset, global_var_code, i
 
     # Assign data to the struct contents
     # Track the encoding rule definition to detect arrays and/or ExtensionObjects
-    encFieldIdx = 0
-    for subv in node.value:
-        encField = node.encodingRule[encFieldIdx]
-        encFieldIdx = encFieldIdx + 1
+    values = node.value
+    if values == None:
+        values = []
+    for idx,subv in enumerate(values):
+        encField = node.encodingRule[idx]
         memberName = lowerFirstChar(encField[0])
 
         # Check if this is an array
@@ -302,22 +302,17 @@ def generateExtensionObjectSubtypeCode(node, parent, nodeset, global_var_code, i
             code.append("UA_STACKARRAY(" + encTypeString + ", " + instanceNameSafe + "_" + memberName+", {0});".format(len(subv)))
             encTypeArr = nodeset.getDataTypeNode(subv[0].__class__.__name__).typesArray
             encTypeArrayString = encTypeArr + "[" + encTypeArr + "_" + subv[0].__class__.__name__.upper() + "]"
-            code.append("UA_init({instanceName}, &{typeArrayString});".format(
-                                                                                instanceName=instanceNameSafe + "_" + memberName,
-                                                                                typeArrayString=encTypeArrayString))
+            code.append("UA_init({instanceName}, &{typeArrayString});".format(instanceName=instanceNameSafe + "_" + memberName,
+                                                                              typeArrayString=encTypeArrayString))
 
-            subArrayIdx = 0
-            for val in subv:
-                code.append(generateNodeValueCode(instanceNameSafe + "_" + memberName + "[" + str(subArrayIdx) + "]" +" = ", val, instanceName,instanceName + "_gehtNed_member", global_var_code, asIndirect=False))
-                subArrayIdx = subArrayIdx + 1
+            for subArrayIdx,val in enumerate(subv):
+                code.append(generateNodeValueCode(instanceNameSafe + "_" + memberName + "[" + str(subArrayIdx) + "]" +" = ",
+                                                  val, instanceName,instanceName + "_gehtNed_member", global_var_code, asIndirect=False))
+            code.append(instanceName + accessor + memberName + "Size = {0};".format(len(subv)))
             code.append(instanceName + accessor + memberName + " = " + instanceNameSafe+"_"+ memberName+";")
             continue
-        else:
-            logger.debug(
-            "Encoding of field " + memberName + " is " + str(subv.encodingRule) + "defined by " + str(encField))
 
-
-
+        logger.debug("Encoding of field " + memberName + " is " + str(subv.encodingRule) + "defined by " + str(encField))
         if subv.valueRank is None or subv.valueRank == 0:
             if not subv.isNone():
                 # Some values can be optional
@@ -326,7 +321,8 @@ def generateExtensionObjectSubtypeCode(node, parent, nodeset, global_var_code, i
                             subv, instanceName,valueName, global_var_code, asIndirect=False))
         else:
             memberName = lowerFirstChar(encField[0])
-            code.append(generateNodeValueCode(instanceName + accessor + memberName + "Size = ", subv, instanceName,valueName, global_var_code, asIndirect=False))
+            code.append(generateNodeValueCode(instanceName + accessor + memberName + "Size = ", subv,
+                                              instanceName,valueName, global_var_code, asIndirect=False))
 
     if not isArrayElement:
         code.append("UA_Variant_setScalar(&attr.value, " + instanceName + ", &" + typeArrayString + ");")
@@ -396,7 +392,7 @@ def generateValueCode(node, parentNode, nodeset, bootstrapping=True):
                     logger.debug("Building extObj array index " + str(idx))
                     instanceName = valueName + "[" + str(idx) + "]"
                     [code1, codeCleanup1] = generateExtensionObjectSubtypeCode(v, parent=parentNode, nodeset=nodeset,
-                                                                                global_var_code=codeGlobal, instanceName=instanceName,
+                                                                               global_var_code=codeGlobal, instanceName=instanceName,
                                                                                isArrayElement=True)
                     code = code + code1
                     codeCleanup = codeCleanup + codeCleanup1
@@ -421,7 +417,8 @@ def generateValueCode(node, parentNode, nodeset, bootstrapping=True):
         else:
             # The following strategy applies to all other types, in particular strings and numerics.
             if isinstance(node.value[0], ExtensionObject):
-                [code1, codeCleanup1] = generateExtensionObjectSubtypeCode(node.value[0], parent=parentNode, nodeset=nodeset, global_var_code=codeGlobal, isArrayElement=False)
+                [code1, codeCleanup1] = generateExtensionObjectSubtypeCode(node.value[0], parent=parentNode, nodeset=nodeset,
+                                                                           global_var_code=codeGlobal, isArrayElement=False)
                 code = code + code1
                 codeCleanup = codeCleanup + codeCleanup1
             instanceName = generateNodeValueInstanceName(node.value[0], parentNode, 0)

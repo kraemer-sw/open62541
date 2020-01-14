@@ -11,7 +11,6 @@ if ! [ -z ${SONAR+x} ]; then
         # Skip on forks
         exit 0;
     fi
-    git fetch --unshallow
 	mkdir -p build && cd build
 	build-wrapper-linux-x86-64 --out-dir ../bw-output cmake \
         -DCMAKE_BUILD_TYPE=Debug \
@@ -28,7 +27,7 @@ fi
 
 # Docker build test
 if ! [ -z ${DOCKER+x} ]; then
-    docker build -t open62541 .
+    docker build -t open62541 -f docker/Dockerfile .
     docker run -d -p 127.0.0.1:4840:4840 --name open62541 open62541 /bin/sh
     docker ps | grep -q open62541
     # disabled since it randomly fails
@@ -355,7 +354,7 @@ if [ "$CC" != "tcc" ]; then
     cmake \
     -DPYTHON_EXECUTABLE:FILEPATH=/usr/bin/$PYTHON \
     -DUA_BUILD_EXAMPLES=ON \
-    -DUA_ENABLE_MULTITHREADING=ON ..
+    -DUA_MULTITHREADING=200 ..
     make -j
     if [ $? -ne 0 ] ; then exit 1 ; fi
     cd .. && rm build -rf
@@ -393,7 +392,7 @@ if [ "$CC" != "tcc" ]; then
         -DUA_BUILD_EXAMPLES=ON \
         -DUA_ENABLE_DISCOVERY=ON \
         -DUA_ENABLE_DISCOVERY_MULTICAST=ON \
-        -DUA_ENABLE_MULTITHREADING=ON ..
+        -DUA_MULTITHREADING=200 ..
     make -j
     if [ $? -ne 0 ] ; then exit 1 ; fi
     cd .. && rm build -rf
@@ -409,6 +408,16 @@ make -j
 if [ $? -ne 0 ] ; then exit 1 ; fi
 cd .. && rm build -rf
 echo -en 'travis_fold:end:script.build.json\\r'
+
+    echo -e "\r\n== Compile PubSub MQTT ==" && echo -en 'travis_fold:start:script.build.mqtt\\r'
+    mkdir -p build && cd build
+    cmake \
+        -DPYTHON_EXECUTABLE:FILEPATH=/usr/bin/$PYTHON \
+        -DUA_ENABLE_PUBSUB=ON -DUA_ENABLE_PUBSUB_MQTT=ON ..
+    make -j
+    if [ $? -ne 0 ] ; then exit 1 ; fi
+    cd .. && rm build -rf
+    echo -en 'travis_fold:end:script.build.mqtt\\r'
 
 echo -e "\r\n== Unit tests (full NS0) ==" && echo -en 'travis_fold:start:script.build.unit_test_ns0_full\\r'
 mkdir -p build && cd build
@@ -427,34 +436,16 @@ cmake \
     -DUA_ENABLE_PUBSUB=ON \
     -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
     -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+    -DUA_ENABLE_PUBSUB_MQTT=ON \
     -DUA_ENABLE_SUBSCRIPTIONS=ON \
     -DUA_ENABLE_SUBSCRIPTIONS_EVENTS=ON \
+    -DUA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS=ON \
     -DUA_ENABLE_UNIT_TESTS_MEMCHECK=OFF \
     -DUA_NAMESPACE_ZERO=FULL ..
 make -j && make test ARGS="-V"
 if [ $? -ne 0 ] ; then exit 1 ; fi
 cd .. && rm build -rf
 echo -en 'travis_fold:end:script.build.unit_test_ns0_full\\r'
-
-if ! [ -z ${DEBIAN+x} ]; then
-    echo -e "\r\n== Building the Debian package =="  && echo -en 'travis_fold:start:script.build.debian\\r'
-    /usr/bin/$PYTHON ./tools/prepare_packaging.py
-    echo -e "\r\n --- New debian changelog content ---"
-    echo "--------------------------------------"
-    cat ./debian/changelog
-    echo "--------------------------------------"
-    # Create a backup copy. We need the clean debian directory for later packaging
-    cp -r debian debian_bak
-    dpkg-buildpackage -b
-    if [ $? -ne 0 ] ; then exit 1 ; fi
-    rm -rf debian
-    mv debian_bak debian
-    cp ../libopen62541*.deb .
-    # Copy for github release script
-    cp ../libopen62541*.deb ../..
-    echo -en 'travis_fold:end:script.build.debian\\r'
-fi
-
 
 if [ "$CC" != "tcc" ]; then
     echo -e "\r\n== Unit tests (minimal NS0) ==" && echo -en 'travis_fold:start:script.build.unit_test_ns0_minimal\\r'
@@ -475,6 +466,7 @@ if [ "$CC" != "tcc" ]; then
         -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=OFF \
         -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
         -DUA_NAMESPACE_ZERO=MINIMAL ..
+
     make -j && make test ARGS="-V"
     if [ $? -ne 0 ] ; then exit 1 ; fi
     cd .. && rm build -rf
@@ -530,6 +522,12 @@ if [ "$CC" != "tcc" ]; then
 				# Create a separate branch with the `pack/` prefix. This branch has the correct debian/changelog set, and
 				# The submodules are directly copied
 				echo -e "\r\n== Pushing 'pack/${REAL_BRANCH}' branch =="  && echo -en 'travis_fold:start:script.build.pack-branch\\r'
+
+                /usr/bin/$PYTHON ./tools/prepare_packaging.py
+                echo -e "--- New debian changelog content ---"
+                echo "--------------------------------------"
+                cat ./debian/changelog
+                echo "--------------------------------------"
 
 				git checkout -b pack-tmp/${REAL_BRANCH}
 				cp -r deps/mdnsd deps/mdnsd_back

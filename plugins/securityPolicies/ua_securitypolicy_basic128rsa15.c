@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
- *    Copyright 2018 (c) Mark Giraud, Fraunhofer IOSB
+ *    Copyright 2018-2019 (c) Mark Giraud, Fraunhofer IOSB
  *    Copyright 2019 (c) Kalycito Infotech Private Limited
  *
  */
@@ -192,6 +192,12 @@ asym_decrypt_sp_basic128rsa15(const UA_SecurityPolicy *securityPolicy,
 
     data->length = outOffset;
     return UA_STATUSCODE_GOOD;
+}
+
+static size_t
+asym_getLocalEncryptionKeyLength_sp_basic128rsa15(const UA_SecurityPolicy *securityPolicy,
+                                                  const Basic128Rsa15_ChannelContext *cc) {
+    return mbedtls_pk_get_len(&cc->policyContext->localPrivateKey) * 8;
 }
 
 static size_t
@@ -578,14 +584,14 @@ channelContext_compareCertificate_sp_basic128rsa15(const Basic128Rsa15_ChannelCo
 }
 
 static void
-deleteMembers_sp_basic128rsa15(UA_SecurityPolicy *securityPolicy) {
+clear_sp_basic128rsa15(UA_SecurityPolicy *securityPolicy) {
     if(securityPolicy == NULL)
         return;
 
+    UA_ByteString_deleteMembers(&securityPolicy->localCertificate);
+
     if(securityPolicy->policyContext == NULL)
         return;
-
-    UA_ByteString_deleteMembers(&securityPolicy->localCertificate);
 
     /* delete all allocated members in the context */
     Basic128Rsa15_PolicyContext *pc = (Basic128Rsa15_PolicyContext *)
@@ -648,7 +654,7 @@ updateCertificateAndPrivateKey_sp_basic128rsa15(UA_SecurityPolicy *securityPolic
     UA_LOG_ERROR(securityPolicy->logger, UA_LOGCATEGORY_SECURITYPOLICY,
                  "Could not update certificate and private key");
     if(securityPolicy->policyContext != NULL)
-        deleteMembers_sp_basic128rsa15(securityPolicy);
+        clear_sp_basic128rsa15(securityPolicy);
     return retval;
 }
 
@@ -691,7 +697,7 @@ policyContext_newContext_sp_basic128rsa15(UA_SecurityPolicy *securityPolicy,
 
     /* Add the system entropy source */
     mbedErr = mbedtls_entropy_add_source(&pc->entropyContext,
-                                         mbedtls_platform_entropy_poll, NULL, 0,
+                                         MBEDTLS_ENTROPY_POLL_METHOD, NULL, 0,
                                          MBEDTLS_ENTROPY_SOURCE_STRONG);
     if(mbedErr) {
         retval = UA_STATUSCODE_BADSECURITYCHECKSFAILED;
@@ -733,7 +739,7 @@ error:
     UA_LOG_ERROR(securityPolicy->logger, UA_LOGCATEGORY_SECURITYPOLICY,
                  "Could not create securityContext: %s", UA_StatusCode_name(retval));
     if(securityPolicy->policyContext != NULL)
-        deleteMembers_sp_basic128rsa15(securityPolicy);
+        clear_sp_basic128rsa15(securityPolicy);
     return retval;
 }
 
@@ -787,7 +793,8 @@ UA_SecurityPolicy_Basic128Rsa15(UA_SecurityPolicy *policy,
     asym_encryptionAlgorithm->decrypt =
         (UA_StatusCode(*)(const UA_SecurityPolicy *, void *, UA_ByteString *))
             asym_decrypt_sp_basic128rsa15;
-    asym_encryptionAlgorithm->getLocalKeyLength = NULL; // TODO: Write function
+    asym_encryptionAlgorithm->getLocalKeyLength =
+        (size_t (*)(const UA_SecurityPolicy *, const void *))asym_getLocalEncryptionKeyLength_sp_basic128rsa15;
     asym_encryptionAlgorithm->getRemoteKeyLength =
         (size_t (*)(const UA_SecurityPolicy *, const void *))asym_getRemoteEncryptionKeyLength_sp_basic128rsa15;
     asym_encryptionAlgorithm->getLocalBlockSize = NULL; // TODO: Write function
@@ -869,9 +876,13 @@ UA_SecurityPolicy_Basic128Rsa15(UA_SecurityPolicy *policy,
         channelContext_compareCertificate_sp_basic128rsa15;
 
     policy->updateCertificateAndPrivateKey = updateCertificateAndPrivateKey_sp_basic128rsa15;
-    policy->deleteMembers = deleteMembers_sp_basic128rsa15;
+    policy->clear = clear_sp_basic128rsa15;
 
-    return policyContext_newContext_sp_basic128rsa15(policy, localPrivateKey);
+    UA_StatusCode res = policyContext_newContext_sp_basic128rsa15(policy, localPrivateKey);
+    if(res != UA_STATUSCODE_GOOD)
+        clear_sp_basic128rsa15(policy);
+
+    return res;
 }
 
 #endif

@@ -75,7 +75,7 @@ sendServiceFault(UA_SecureChannel *channel, const UA_ByteString *msg,
         return retval;
     retval = sendServiceFaultWithRequest(channel, &requestHeader, responseType,
                                          requestId, error);
-    UA_RequestHeader_deleteMembers(&requestHeader);
+    UA_RequestHeader_clear(&requestHeader);
     return retval;
 }
 
@@ -287,7 +287,7 @@ processHEL(UA_Server *server, UA_Connection *connection,
         return retval;
 
     /* Currently not checked */
-    UA_String_deleteMembers(&helloMessage.endpointUrl);
+    UA_String_clear(&helloMessage.endpointUrl);
 
     /* TODO: Use the config of the exact NetworkLayer */
     if(server->config.networkLayersSize == 0)
@@ -311,7 +311,7 @@ processHEL(UA_Server *server, UA_Connection *connection,
 
     /* Build acknowledge response */
     UA_TcpAcknowledgeMessage ackMessage;
-    memcpy(&ackMessage, localConfig, sizeof(UA_TcpAcknowledgeMessage)); /* Same struct layout.. */
+    memcpy(&ackMessage, &connection->config, sizeof(UA_TcpAcknowledgeMessage)); /* Same struct layout.. */
     UA_TcpMessageHeader ackHeader;
     ackHeader.messageTypeAndChunkType = UA_MESSAGETYPE_ACK + UA_CHUNKTYPE_FINAL;
     ackHeader.messageSize = 8 + 20; /* ackHeader + ackMessage */
@@ -353,9 +353,9 @@ processOPN(UA_Server *server, UA_SecureChannel *channel,
     UA_StatusCode retval = UA_NodeId_decodeBinary(msg, &offset, &requestType);
 
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_NodeId_deleteMembers(&requestType);
-        UA_LOG_INFO_CHANNEL(&server->config.logger, channel,
-                            "Could not decode the NodeId. Closing the connection");
+        UA_NodeId_clear(&requestType);
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
+                               "Could not decode the NodeId. Closing the connection");
         UA_SecureChannelManager_close(&server->secureChannelManager, channel->securityToken.channelId);
         return retval;
     }
@@ -364,23 +364,23 @@ processOPN(UA_Server *server, UA_SecureChannel *channel,
     /* Error occurred */
     if(retval != UA_STATUSCODE_GOOD ||
        requestType.identifier.numeric != UA_TYPES[UA_TYPES_OPENSECURECHANNELREQUEST].binaryEncodingId) {
-        UA_NodeId_deleteMembers(&requestType);
-        UA_OpenSecureChannelRequest_deleteMembers(&openSecureChannelRequest);
-        UA_LOG_INFO_CHANNEL(&server->config.logger, channel,
-                            "Could not decode the OPN message. Closing the connection.");
+        UA_NodeId_clear(&requestType);
+        UA_OpenSecureChannelRequest_clear(&openSecureChannelRequest);
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
+                               "Could not decode the OPN message. Closing the connection.");
         UA_SecureChannelManager_close(&server->secureChannelManager, channel->securityToken.channelId);
         return retval;
     }
-    UA_NodeId_deleteMembers(&requestType);
+    UA_NodeId_clear(&requestType);
 
     /* Call the service */
     UA_OpenSecureChannelResponse openScResponse;
     UA_OpenSecureChannelResponse_init(&openScResponse);
     Service_OpenSecureChannel(server, channel, &openSecureChannelRequest, &openScResponse);
-    UA_OpenSecureChannelRequest_deleteMembers(&openSecureChannelRequest);
+    UA_OpenSecureChannelRequest_clear(&openSecureChannelRequest);
     if(openScResponse.responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
-        UA_LOG_INFO_CHANNEL(&server->config.logger, channel, "Could not open a SecureChannel. "
-                            "Closing the connection.");
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel, "Could not open a SecureChannel. "
+                               "Closing the connection.");
         UA_SecureChannelManager_close(&server->secureChannelManager,
                                       channel->securityToken.channelId);
         return openScResponse.responseHeader.serviceResult;
@@ -389,20 +389,73 @@ processOPN(UA_Server *server, UA_SecureChannel *channel,
     /* Send the response */
     retval = UA_SecureChannel_sendAsymmetricOPNMessage(channel, requestId, &openScResponse,
                                                        &UA_TYPES[UA_TYPES_OPENSECURECHANNELRESPONSE]);
-    UA_OpenSecureChannelResponse_deleteMembers(&openScResponse);
+    UA_OpenSecureChannelResponse_clear(&openScResponse);
     if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_INFO_CHANNEL(&server->config.logger, channel,
-                            "Could not send the OPN answer with error code %s",
-                            UA_StatusCode_name(retval));
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
+                               "Could not send the OPN answer with error code %s",
+                               UA_StatusCode_name(retval));
         UA_SecureChannelManager_close(&server->secureChannelManager,
                                       channel->securityToken.channelId);
-        return retval;
     }
 
     return retval;
 }
 
 static UA_StatusCode
+decryptProcessOPN(UA_Server *server, UA_SecureChannel *channel,
+                  const UA_ByteString *msg) {
+    UA_LOG_DEBUG_CHANNEL(&server->config.logger, channel, "Decrypt an OPN message");
+
+    /* Skip the first header. We know length and message type. */
+    size_t offset = UA_SECURE_CONVERSATION_MESSAGE_HEADER_LENGTH;
+
+    UA_LOG_DEBUG_CHANNEL(&server->config.logger, channel, "Decrypt an OPN message");
+
+    /* Decode the asymmetric algorithm security header and call the callback
+     * to perform checks. */
+    UA_AsymmetricAlgorithmSecurityHeader asymHeader;
+    UA_AsymmetricAlgorithmSecurityHeader_init(&asymHeader);
+    UA_StatusCode retval =
+        UA_AsymmetricAlgorithmSecurityHeader_decodeBinary(msg, &offset, &asymHeader);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
+                               "Could not decode the OPN header");
+        return retval;
+    }
+
+    retval = checkAsymHeader(channel, &asymHeader);
+    UA_AsymmetricAlgorithmSecurityHeader_deleteMembers(&asymHeader);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
+                               "Could not verify OPN header");
+        return retval;
+    }
+
+    UA_ByteString chunkPayload;
+    UA_UInt32 requestId = 0;
+    UA_UInt32 sequenceNumber = 0;
+    retval = decryptAndVerifyChunk(channel, &channel->securityPolicy->asymmetricModule.cryptoModule,
+                                   UA_MESSAGETYPE_OPN, msg, offset, &requestId,
+                                   &sequenceNumber, &chunkPayload);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
+                               "Could not decrypt and verify the OPN payload");
+        return retval;
+    }
+
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    retval = processSequenceNumberAsym(channel, sequenceNumber);
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
+                               "Could not process the OPN message's sequence number");
+        return retval;
+    }
+#endif
+
+    return processOPN(server, channel, requestId, &chunkPayload);
+}
+
+UA_StatusCode
 sendResponse(UA_SecureChannel *channel, UA_UInt32 requestId, UA_UInt32 requestHandle,
              UA_ResponseHeader *responseHeader, const UA_DataType *responseType) {
     /* Prepare the ResponseHeader */
@@ -441,9 +494,11 @@ processMSGDecoded(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 reques
                   const UA_DataType *responseType, UA_Boolean sessionRequired) {
     /* CreateSession doesn't need a session */
     if(requestType == &UA_TYPES[UA_TYPES_CREATESESSIONREQUEST]) {
+        UA_LOCK(server->serviceMutex);
         Service_CreateSession(server, channel,
                               (const UA_CreateSessionRequest *)requestHeader,
                               (UA_CreateSessionResponse *)responseHeader);
+        UA_UNLOCK(server->serviceMutex);
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
         /* Store the authentication token and session ID so we can help fuzzing
          * by setting these values in the next request automatically */
@@ -457,9 +512,12 @@ processMSGDecoded(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 reques
     /* Find the matching session */
     UA_Session *session = (UA_Session*)
         UA_SecureChannel_getSession(channel, &requestHeader->authenticationToken);
-    if(!session && !UA_NodeId_isNull(&requestHeader->authenticationToken))
+    if(!session && !UA_NodeId_isNull(&requestHeader->authenticationToken)) {
+        UA_LOCK(server->serviceMutex);
         session = UA_SessionManager_getSessionByToken(&server->sessionManager,
                                                       &requestHeader->authenticationToken);
+        UA_UNLOCK(server->serviceMutex)
+    }
 
     if(requestType == &UA_TYPES[UA_TYPES_ACTIVATESESSIONREQUEST]) {
         if(!session) {
@@ -469,9 +527,11 @@ processMSGDecoded(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 reques
             return sendServiceFaultWithRequest(channel, requestHeader, responseType,
                                     requestId, UA_STATUSCODE_BADSESSIONIDINVALID);
         }
+        UA_LOCK(server->serviceMutex);
         Service_ActivateSession(server, channel, session,
                                 (const UA_ActivateSessionRequest*)requestHeader,
                                 (UA_ActivateSessionResponse*)responseHeader);
+        UA_UNLOCK(server->serviceMutex);
         return sendResponse(channel, requestId, requestHeader->requestHandle,
                             responseHeader, responseType);
     }
@@ -480,7 +540,7 @@ processMSGDecoded(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 reques
     UA_Session anonymousSession;
     if(!session) {
         if(sessionRequired) {
-#ifdef UA_ENABLE_TYPENAMES
+#ifdef UA_ENABLE_TYPEDESCRIPTION
             UA_LOG_WARNING_CHANNEL(&server->config.logger, channel,
                                    "%s refused without a valid session",
                                    requestType->typeName);
@@ -503,7 +563,7 @@ processMSGDecoded(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 reques
      * CloseSessionRequest */
     if(sessionRequired && !session->activated &&
        requestType != &UA_TYPES[UA_TYPES_CLOSESESSIONREQUEST]) {
-#ifdef UA_ENABLE_TYPENAMES
+#ifdef UA_ENABLE_TYPEDESCRIPTION
         UA_LOG_WARNING_SESSION(&server->config.logger, session,
                                "%s refused on a non-activated session",
                                requestType->typeName);
@@ -512,8 +572,10 @@ processMSGDecoded(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 reques
                                "Service %i refused on a non-activated session",
                                requestType->binaryEncodingId);
 #endif
+        UA_LOCK(server->serviceMutex);
         UA_SessionManager_removeSession(&server->sessionManager,
                                         &session->header.authenticationToken);
+        UA_UNLOCK(server->serviceMutex);
         return sendServiceFaultWithRequest(channel, requestHeader, responseType,
                                            requestId, UA_STATUSCODE_BADSESSIONNOTACTIVATED);
     }
@@ -533,13 +595,36 @@ processMSGDecoded(UA_Server *server, UA_SecureChannel *channel, UA_UInt32 reques
 #ifdef UA_ENABLE_SUBSCRIPTIONS
     /* The publish request is not answered immediately */
     if(requestType == &UA_TYPES[UA_TYPES_PUBLISHREQUEST]) {
+        UA_LOCK(server->serviceMutex);
         Service_Publish(server, session, (const UA_PublishRequest*)requestHeader, requestId);
+        UA_UNLOCK(server->serviceMutex);
         return UA_STATUSCODE_GOOD;
     }
 #endif
 
+#if UA_MULTITHREADING >= 100
+    /* The call request might not be answered immediately */
+    if(requestType == &UA_TYPES[UA_TYPES_CALLREQUEST]) {
+        UA_Boolean finished = true;
+        UA_LOCK(server->serviceMutex);
+        Service_CallAsync(server, session, requestId, (const UA_CallRequest*)requestHeader,
+                          (UA_CallResponse*)responseHeader, &finished);
+        UA_UNLOCK(server->serviceMutex);
+
+        /* Async method calls remain. Don't send a response now */
+        if(!finished)
+            return UA_STATUSCODE_GOOD;
+
+        /* We are done here */
+        return sendResponse(channel, requestId, requestHeader->requestHandle,
+                            responseHeader, responseType);
+    }
+#endif
+
     /* Dispatch the synchronous service call and send the response */
+    UA_LOCK(server->serviceMutex);
     service(server, session, requestHeader, responseHeader);
+    UA_UNLOCK(server->serviceMutex);
     return sendResponse(channel, requestId, requestHeader->requestHandle,
                         responseHeader, responseType);
 }
@@ -555,7 +640,7 @@ processMSG(UA_Server *server, UA_SecureChannel *channel,
         return retval;
     if(requestTypeId.namespaceIndex != 0 ||
        requestTypeId.identifierType != UA_NODEIDTYPE_NUMERIC)
-        UA_NodeId_deleteMembers(&requestTypeId); /* leads to badserviceunsupported */
+        UA_NodeId_clear(&requestTypeId); /* leads to badserviceunsupported */
 
     size_t requestPos = offset; /* Store the offset (for sendServiceFault) */
 
@@ -600,7 +685,7 @@ processMSG(UA_Server *server, UA_SecureChannel *channel,
             if(server->config.verifyRequestTimestamp <= UA_RULEHANDLING_ABORT) {
                 retval = sendServiceFaultWithRequest(channel, requestHeader, responseType,
                                                      requestId, UA_STATUSCODE_BADINVALIDTIMESTAMP);
-                UA_deleteMembers(request, requestType);
+                UA_clear(request, requestType);
                 return retval;
             }
         }
@@ -609,7 +694,7 @@ processMSG(UA_Server *server, UA_SecureChannel *channel,
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     /* Set the authenticationToken from the create session request to help
      * fuzzing cover more lines */
-    UA_NodeId_deleteMembers(&requestHeader->authenticationToken);
+    UA_NodeId_clear(&requestHeader->authenticationToken);
     if(!UA_NodeId_isNull(&unsafe_fuzz_authenticationToken))
         UA_NodeId_copy(&unsafe_fuzz_authenticationToken, &requestHeader->authenticationToken);
 #endif
@@ -624,8 +709,8 @@ processMSG(UA_Server *server, UA_SecureChannel *channel,
                                responseHeader, responseType, sessionRequired);
 
     /* Clean up */
-    UA_deleteMembers(request, requestType);
-    UA_deleteMembers(responseHeader, responseType);
+    UA_clear(request, requestType);
+    UA_clear(responseHeader, responseType);
     return retval;
 }
 
@@ -640,7 +725,8 @@ processSecureChannelMessage(void *application, UA_SecureChannel *channel,
     case UA_MESSAGETYPE_OPN:
         UA_LOG_TRACE_CHANNEL(&server->config.logger, channel,
                              "Process an OPN on an open channel");
-        retval = processOPN(server, channel, requestId, message);
+        /* Message contains the full undecrypted chunk */
+        retval = decryptProcessOPN(server, channel, message);
         break;
     case UA_MESSAGETYPE_MSG:
         UA_LOG_TRACE_CHANNEL(&server->config.logger, channel, "Process a MSG");
@@ -737,7 +823,7 @@ processCompleteChunkWithoutChannel(UA_Server *server, UA_Connection *connection,
             break;
 
         retval = createSecureChannel(server, connection, &asymHeader);
-        UA_AsymmetricAlgorithmSecurityHeader_deleteMembers(&asymHeader);
+        UA_AsymmetricAlgorithmSecurityHeader_clear(&asymHeader);
         if(retval != UA_STATUSCODE_GOOD)
             break;
 
@@ -810,7 +896,7 @@ UA_Server_processBinaryMessage(UA_Server *server, UA_Connection *connection,
     UA_SecureChannel_persistIncompleteMessages(connection->channel);
 }
 
-#ifdef UA_ENABLE_MULTITHREADING
+#if UA_MULTITHREADING >= 200
 static void
 deleteConnection(UA_Server *server, UA_Connection *connection) {
     connection->free(connection);
@@ -820,9 +906,7 @@ deleteConnection(UA_Server *server, UA_Connection *connection) {
 void
 UA_Server_removeConnection(UA_Server *server, UA_Connection *connection) {
     UA_Connection_detachSecureChannel(connection);
-#ifndef UA_ENABLE_MULTITHREADING
-    connection->free(connection);
-#else
+#if UA_MULTITHREADING >= 200
     UA_DelayedCallback *dc = (UA_DelayedCallback*)UA_malloc(sizeof(UA_DelayedCallback));
     if(!dc)
         return; /* Malloc cannot fail on OS's that support multithreading. They
@@ -831,5 +915,7 @@ UA_Server_removeConnection(UA_Server *server, UA_Connection *connection) {
     dc->application = server;
     dc->data = connection;
     UA_WorkQueue_enqueueDelayed(&server->workQueue, dc);
+#else
+    connection->free(connection);
 #endif
 }

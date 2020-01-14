@@ -121,6 +121,8 @@ UA_String_equal(const UA_String *s1, const UA_String *s2) {
         return false;
     if(s1->length == 0)
         return true;
+    if(s2->data == NULL)
+        return false;
     i32 is = memcmp((char const*)s1->data,
                     (char const*)s2->data, s1->length);
     return (is == 0) ? true : false;
@@ -193,6 +195,27 @@ UA_DateTime_toStruct(UA_DateTime t) {
     dateTimeStruct.month  = (u16)(ts.tm_mon + 1);
     dateTimeStruct.year   = (u16)(ts.tm_year + 1900);
     return dateTimeStruct;
+}
+
+UA_DateTime
+UA_DateTime_fromStruct(UA_DateTimeStruct ts) {
+    /* Seconds since the Unix epoch */
+    struct mytm tm;
+    memset(&tm, 0, sizeof(struct mytm));
+    tm.tm_year = ts.year - 1900;
+    tm.tm_mon = ts.month - 1;
+    tm.tm_mday = ts.day;
+    tm.tm_hour = ts.hour;
+    tm.tm_min = ts.min;
+    tm.tm_sec = ts.sec;
+    long long sec_epoch = __tm_to_secs(&tm);
+
+    UA_DateTime t = UA_DATETIME_UNIX_EPOCH;
+    t += sec_epoch * UA_DATETIME_SEC;
+    t += ts.milliSec * UA_DATETIME_MSEC;
+    t += ts.microSec * UA_DATETIME_USEC;
+    t += ts.nanoSec / 100;
+    return t;
 }
 
 /* Guid */
@@ -363,8 +386,8 @@ UA_NodeId_order(const UA_NodeId *n1, const UA_NodeId *n2) {
 /* FNV non-cryptographic hash function. See
  * https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function */
 #define FNV_PRIME_32 16777619
-static u32
-fnv32(u32 fnv, const u8 *buf, size_t size) {
+u32
+UA_ByteString_hash(u32 fnv, const u8 *buf, size_t size) {
     for(size_t i = 0; i < size; ++i) {
         fnv = fnv ^ (buf[i]);
         fnv = fnv * FNV_PRIME_32;
@@ -381,9 +404,9 @@ UA_NodeId_hash(const UA_NodeId *n) {
         return (u32)((n->namespaceIndex + ((n->identifier.numeric * (u64)2654435761) >> (32))) & UINT32_C(4294967295)); /*  Knuth's multiplicative hashing */
     case UA_NODEIDTYPE_STRING:
     case UA_NODEIDTYPE_BYTESTRING:
-        return fnv32(n->namespaceIndex, n->identifier.string.data, n->identifier.string.length);
+        return UA_ByteString_hash(n->namespaceIndex, n->identifier.string.data, n->identifier.string.length);
     case UA_NODEIDTYPE_GUID:
-        return fnv32(n->namespaceIndex, (const u8*)&n->identifier.guid, sizeof(UA_Guid));
+        return UA_ByteString_hash(n->namespaceIndex, (const u8*)&n->identifier.guid, sizeof(UA_Guid));
     }
 }
 
@@ -429,8 +452,8 @@ UA_ExpandedNodeId_order(const UA_ExpandedNodeId *n1,
 u32
 UA_ExpandedNodeId_hash(const UA_ExpandedNodeId *n) {
     u32 h = UA_NodeId_hash(&n->nodeId);
-    h = fnv32(h, (const UA_Byte*)&n->serverIndex, 4);
-    return fnv32(h, n->namespaceUri.data, n->namespaceUri.length);
+    h = UA_ByteString_hash(h, (const UA_Byte*)&n->serverIndex, 4);
+    return UA_ByteString_hash(h, n->namespaceUri.data, n->namespaceUri.length);
 }
 
 /* ExtensionObject */

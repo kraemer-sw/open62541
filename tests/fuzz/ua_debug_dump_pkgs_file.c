@@ -1,6 +1,10 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ *    Copyright 2019 (c) fortiss (Author: Stefan Profanter)
+ */
+
 
 /**
  * This code is used to generate a binary file for every request type
@@ -172,7 +176,7 @@ UA_debug_dumpCompleteChunk(UA_Server *const server, UA_Connection *const connect
     }
 
     char fileName[250];
-    snprintf(fileName, 255, "%s/%05d_%s%s", UA_CORPUS_OUTPUT_DIR, ++UA_dump_chunkCount,
+    snprintf(fileName, sizeof(fileName), "%s/%05u_%s%s", UA_CORPUS_OUTPUT_DIR, ++UA_dump_chunkCount,
              dump_filename.messageType ? dump_filename.messageType : "", dump_filename.serviceName);
 
     char dumpOutputFile[266];
@@ -180,7 +184,7 @@ UA_debug_dumpCompleteChunk(UA_Server *const server, UA_Connection *const connect
     // check if file exists and if yes create a counting filename to avoid overwriting
     unsigned cnt = 1;
     while ( access( dumpOutputFile, F_OK ) != -1 ) {
-        snprintf(dumpOutputFile, 266, "%s_%d.bin", fileName, cnt);
+        snprintf(dumpOutputFile, 266, "%s_%u.bin", fileName, cnt);
         cnt++;
     }
 

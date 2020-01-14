@@ -31,7 +31,6 @@
 
 static void
 UA_Client_init(UA_Client* client) {
-    memset(client, 0, sizeof(UA_Client));
     UA_SecureChannel_init(&client->channel);
     if(client->config.stateCallback)
         client->config.stateCallback(client, client->state);
@@ -42,11 +41,15 @@ UA_Client_init(UA_Client* client) {
     UA_WorkQueue_init(&client->workQueue);
 }
 
-UA_Client *
-UA_Client_new() {
+UA_Client UA_EXPORT *
+UA_Client_newWithConfig(const UA_ClientConfig *config) {
+    if(!config)
+        return NULL;
     UA_Client *client = (UA_Client*)UA_malloc(sizeof(UA_Client));
     if(!client)
         return NULL;
+    memset(client, 0, sizeof(UA_Client));
+    client->config = *config;
     UA_Client_init(client);
     return client;
 }
@@ -61,16 +64,23 @@ UA_ClientConfig_deleteMembers(UA_ClientConfig *config) {
     UA_EndpointDescription_deleteMembers(&config->endpoint);
     UA_UserTokenPolicy_deleteMembers(&config->userTokenPolicy);
 
-    if(config->certificateVerification.deleteMembers)
-        config->certificateVerification.deleteMembers(&config->certificateVerification);
+    if(config->certificateVerification.clear)
+        config->certificateVerification.clear(&config->certificateVerification);
 
     /* Delete the SecurityPolicies */
     if(config->securityPolicies == 0)
         return;
     for(size_t i = 0; i < config->securityPoliciesSize; i++)
-        config->securityPolicies[i].deleteMembers(&config->securityPolicies[i]);
+        config->securityPolicies[i].clear(&config->securityPolicies[i]);
     UA_free(config->securityPolicies);
     config->securityPolicies = 0;
+
+    if (config->logger.context && config->logger.clear) {
+        config->logger.clear(config->logger.context);
+        config->logger.context = NULL;
+        config->logger.log = NULL;
+        config->logger.clear = NULL;
+    }
 }
 
 static void
@@ -81,7 +91,7 @@ UA_Client_deleteMembers(UA_Client *client) {
     //UA_SecureChannel_deleteMembersCleanup(&client->channel);
     if (client->connection.free)
         client->connection.free(&client->connection);
-    UA_Connection_deleteMembers(&client->connection);
+    UA_Connection_clear(&client->connection);
     UA_NodeId_deleteMembers(&client->authenticationToken);
     UA_String_deleteMembers(&client->endpointUrl);
 
@@ -98,8 +108,6 @@ UA_Client_deleteMembers(UA_Client *client) {
 
     /* Clean up the work queue */
     UA_WorkQueue_cleanup(&client->workQueue);
-
-    UA_ClientConfig_deleteMembers(&client->config);
 }
 
 void
@@ -111,6 +119,7 @@ UA_Client_reset(UA_Client* client) {
 void
 UA_Client_delete(UA_Client* client) {
     UA_Client_deleteMembers(client);
+    UA_ClientConfig_deleteMembers(&client->config);
     UA_free(client);
 }
 
@@ -253,9 +262,15 @@ processServiceResponse(void *application, UA_SecureChannel *channel,
                        const UA_ByteString *message) {
     SyncResponseDescription *rd = (SyncResponseDescription*)application;
 
+    /* Process undecoded OPN forwarded from the SecureChannel */
+    if(messageType == UA_MESSAGETYPE_OPN) {
+        decodeProcessOPNResponseAsync(rd->client, &rd->client->channel,
+                                      messageType, requestId, message);
+        return;
+    }
+
     /* Must be OPN or MSG */
-    if(messageType != UA_MESSAGETYPE_OPN &&
-       messageType != UA_MESSAGETYPE_MSG) {
+    if(messageType != UA_MESSAGETYPE_MSG) {
         UA_LOG_TRACE_CHANNEL(&rd->client->config.logger, channel,
                              "Invalid message type");
         return;
@@ -303,7 +318,7 @@ processServiceResponse(void *application, UA_SecureChannel *channel,
         goto finish;
     }
 
-#ifdef UA_ENABLE_TYPENAMES
+#ifdef UA_ENABLE_TYPEDESCRIPTION
     UA_LOG_DEBUG(&rd->client->config.logger, UA_LOGCATEGORY_CLIENT,
                  "Decode a message of type %s", rd->responseType->typeName);
 #else
@@ -375,7 +390,7 @@ receiveServiceResponse(UA_Client *client, void *response, const UA_DataType *res
             UA_Client_disconnect(client);
             break;
         }
-    } while(!rd.received);
+    } while(!rd.received && responseType); /* Return if we don't wait for an async response */
     return retval;
 }
 

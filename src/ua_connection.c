@@ -20,7 +20,7 @@
 #include "ua_types_encoding_binary.h"
 #include "ua_util_internal.h"
 
-void UA_Connection_deleteMembers(UA_Connection *connection) {
+void UA_Connection_clear(UA_Connection *connection) {
     UA_ByteString_deleteMembers(&connection->incompleteChunk);
 }
 
@@ -147,16 +147,22 @@ processChunk(UA_Connection *connection, void *application,
     if(chunk_length < 16 || chunk_length > connection->config.recvBufferSize)
         return UA_STATUSCODE_BADTCPMESSAGETOOLARGE;
 
-    /* Have an the complete chunk */
+    /* Incomplete chunk */
     if(chunk_length > remaining) {
         *done = true;
         return UA_STATUSCODE_GOOD;
     }
 
+    *done = false;
+
+    /* Buffer everything after the OPN message: Process in the next
+     * iteration. */
+    if(msgtype == UA_MESSAGETYPE_OPN)
+        *done = true;
+
     /* Process the chunk; forward the position pointer */
     temp.length = chunk_length;
     *posp += chunk_length;
-    *done = false;
     return processCallback(application, connection, &temp);
 }
 
