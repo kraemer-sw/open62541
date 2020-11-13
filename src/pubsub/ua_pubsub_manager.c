@@ -221,7 +221,7 @@ UA_Server_removePublishedDataSet(UA_Server *server, const UA_NodeId pds) {
     if(!publishedDataSet){
         return UA_STATUSCODE_BADNOTFOUND;
     }
-    if(publishedDataSet->config.configurationFrozen){
+    if(publishedDataSet->configurationFrozen){
         UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
                        "Remove PublishedDataSet failed. PublishedDataSet is frozen.");
         return UA_STATUSCODE_BADCONFIGURATIONERROR;
@@ -288,8 +288,10 @@ UA_PubSubManager_delete(UA_Server *server, UA_PubSubManager *pubSubManager) {
     }
 
     //free the currently configured transport layers
-    UA_free(server->config.pubsubTransportLayers);
-    server->config.pubsubTransportLayersSize = 0;
+    if (server->config.pubsubTransportLayersSize > 0) {
+        UA_free(server->config.pubsubTransportLayers);
+        server->config.pubsubTransportLayersSize = 0;
+    }
 
     //remove Connections and WriterGroups
     UA_PubSubConnection *tmpConnection1, *tmpConnection2;
@@ -306,10 +308,7 @@ UA_PubSubManager_delete(UA_Server *server, UA_PubSubManager *pubSubManager) {
 /*      PubSub Jobs abstraction    */
 /***********************************/
 
-#ifndef UA_ENABLE_PUBSUB_CUSTOM_PUBLISH_HANDLING
-
-/* If UA_ENABLE_PUBSUB_CUSTOM_PUBLISH_INTERRUPT is enabled, a custom callback
- * management must be linked to the application */
+/* Default Timer based PubSub Callbacks */
 
 UA_StatusCode
 UA_PubSubManager_addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
@@ -328,7 +327,5 @@ void
 UA_PubSubManager_removeRepeatedPubSubCallback(UA_Server *server, UA_UInt64 callbackId) {
     UA_Timer_removeCallback(&server->timer, callbackId);
 }
-
-#endif /* UA_ENABLE_PUBSUB_CUSTOM_PUBLISH_HANDLING */
 
 #endif /* UA_ENABLE_PUBSUB */

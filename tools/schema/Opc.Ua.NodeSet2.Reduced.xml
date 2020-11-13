@@ -265,6 +265,12 @@
       <Reference ReferenceType="HasSubtype" IsForward="false">i=26</Reference>
     </References>
   </UADataType>
+  <UADataType NodeId="i=12756" BrowseName="Union" IsAbstract="true">
+    <DisplayName>Union</DisplayName>
+    <References>
+      <Reference ReferenceType="HasSubtype" IsForward="false">i=22</Reference>
+    </References>
+  </UADataType>
   <UAReferenceType NodeId="i=31" BrowseName="References" IsAbstract="true" Symmetric="true">
     <DisplayName>References</DisplayName>
     <References />
@@ -1506,13 +1512,6 @@
       <Reference ReferenceType="HasTypeDefinition">i=61</Reference>
     </References>
   </UAObject>
-  <UAReferenceType NodeId="i=17603" BrowseName="HasInterface">
-    <DisplayName>HasInterface</DisplayName>
-    <References>
-      <Reference ReferenceType="HasSubtype" IsForward="false">i=32</Reference>
-    </References>
-    <InverseName>InterfaceOf</InverseName>
-  </UAReferenceType>
   <UAReferenceType NodeId="i=17604" BrowseName="HasAddIn">
     <DisplayName>HasAddIn</DisplayName>
     <References>

@@ -31,22 +31,28 @@
 #include <valgrind/memcheck.h>
 #endif
 
+#define STARTCHANNELID 1
+#define STARTTOKENID 1
+
 /**********************/
 /* Namespace Handling */
 /**********************/
 
-/*
- * The NS1 Uri can be changed by the user to some custom string.
- * This method is called to initialize the NS1 Uri if it is not set before to the default Application URI.
+/* The NS1 Uri can be changed by the user to some custom string. This method is
+ * called to initialize the NS1 Uri if it is not set before to the default
+ * Application URI.
  *
- * This is done as soon as the Namespace Array is read or written via node value read / write services,
- * or UA_Server_addNamespace, UA_Server_getNamespaceByName or UA_Server_run_startup is called.
+ * This is done as soon as the Namespace Array is read or written via node value
+ * read / write services, or UA_Server_addNamespace,
+ * UA_Server_getNamespaceByName or UA_Server_run_startup is called.
  *
- * Therefore one has to set the custom NS1 URI before one of the previously mentioned steps.
- */
-void setupNs1Uri(UA_Server *server) {
-    if (!server->namespaces[1].data) {
-        UA_String_copy(&server->config.applicationDescription.applicationUri, &server->namespaces[1]);
+ * Therefore one has to set the custom NS1 URI before one of the previously
+ * mentioned steps. */
+void
+setupNs1Uri(UA_Server *server) {
+    if(!server->namespaces[1].data) {
+        UA_String_copy(&server->config.applicationDescription.applicationUri,
+                       &server->namespaces[1]);
     }
 }
 
@@ -89,31 +95,35 @@ UA_UInt16 UA_Server_addNamespace(UA_Server *server, const char* name) {
 }
 
 UA_ServerConfig*
-UA_Server_getConfig(UA_Server *server)
-{
+UA_Server_getConfig(UA_Server *server) {
   if(!server)
-    return NULL;
-
+      return NULL;
   return &server->config;
 }
 
 UA_StatusCode
-UA_Server_getNamespaceByName(UA_Server *server, const UA_String namespaceUri,
-                             size_t* foundIndex) {
-    UA_LOCK(server->serviceMutex);
-
+getNamespaceByName(UA_Server *server, const UA_String namespaceUri,
+                   size_t *foundIndex) {
     /* ensure that the uri for ns1 is set up from the app description */
     setupNs1Uri(server);
-
+    UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
     for(size_t idx = 0; idx < server->namespacesSize; idx++) {
-        if(!UA_String_equal(&server->namespaces[idx], &namespaceUri))
-            continue;
-        (*foundIndex) = idx;
-        UA_UNLOCK(server->serviceMutex);
-        return UA_STATUSCODE_GOOD;
+        if(UA_String_equal(&server->namespaces[idx], &namespaceUri)) {
+            (*foundIndex) = idx;
+            res = UA_STATUSCODE_GOOD;
+            break;
+        }
     }
+    return res;
+}
+
+UA_StatusCode
+UA_Server_getNamespaceByName(UA_Server *server, const UA_String namespaceUri,
+                             size_t *foundIndex) {
+    UA_LOCK(server->serviceMutex);
+    UA_StatusCode res = getNamespaceByName(server, namespaceUri, foundIndex);
     UA_UNLOCK(server->serviceMutex);
-    return UA_STATUSCODE_BADNOTFOUND;
+    return res;
 }
 
 UA_StatusCode
@@ -141,12 +151,14 @@ UA_Server_forEachChildNodeCall(UA_Server *server, UA_NodeId parentNodeId,
     }
 
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    for(size_t i = parentCopy->referencesSize; i > 0; --i) {
-        UA_NodeReferenceKind *ref = &parentCopy->references[i - 1];
-        for(size_t j = 0; j<ref->refTargetsSize; j++) {
+    for(size_t i = parentCopy->head.referencesSize; i > 0; --i) {
+        UA_NodeReferenceKind *ref = &parentCopy->head.references[i - 1];
+        UA_NodeId refTypeId =
+            *UA_NODESTORE_GETREFERENCETYPEID(server, ref->referenceTypeIndex);
+        UA_ReferenceTarget *target;
+        TAILQ_FOREACH(target, &ref->queueHead, queuePointers) {
             UA_UNLOCK(server->serviceMutex);
-            retval = callback(ref->refTargets[j].target.nodeId, ref->isInverse,
-                              ref->referenceTypeId, handle);
+            retval = callback(target->targetId.nodeId, ref->isInverse, refTypeId, handle);
             UA_LOCK(server->serviceMutex);
             if(retval != UA_STATUSCODE_GOOD)
                 goto cleanup;
@@ -166,25 +178,32 @@ cleanup:
 /* Server Lifecycle */
 /********************/
 
+static void
+serverExecuteRepeatedCallback(UA_Server *server, UA_ApplicationCallback cb,
+                              void *callbackApplication, void *data);
+
 /* The server needs to be stopped before it can be deleted */
 void UA_Server_delete(UA_Server *server) {
-    /* Delete all internal data */
-    UA_SecureChannelManager_deleteMembers(&server->secureChannelManager);
     UA_LOCK(server->serviceMutex);
+
+    UA_Server_deleteSecureChannels(server);
     session_list_entry *current, *temp;
     LIST_FOREACH_SAFE(current, &server->sessions, pointers, temp) {
-        UA_Server_removeSession(server, current);
+        UA_Server_removeSession(server, current, UA_DIAGNOSTICEVENT_CLOSE);
     }
-    UA_UNLOCK(server->serviceMutex);
     UA_Array_delete(server->namespaces, server->namespacesSize, &UA_TYPES[UA_TYPES_STRING]);
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS
     UA_MonitoredItem *mon, *mon_tmp;
     LIST_FOREACH_SAFE(mon, &server->localMonitoredItems, listEntry, mon_tmp) {
         LIST_REMOVE(mon, listEntry);
-        UA_LOCK(server->serviceMutex);
         UA_MonitoredItem_delete(server, mon);
-        UA_UNLOCK(server->serviceMutex);
+    }
+
+    /* Remove subscriptions without a session */
+    UA_Subscription *sub, *sub_tmp;
+    LIST_FOREACH_SAFE(sub, &server->subscriptions, serverListEntry, sub_tmp) {
+        UA_Server_deleteSubscription(server, sub);
     }
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS
@@ -198,7 +217,7 @@ void UA_Server_delete(UA_Server *server) {
 #endif
 
 #ifdef UA_ENABLE_DISCOVERY
-    UA_DiscoveryManager_deleteMembers(&server->discoveryManager, server);
+    UA_DiscoveryManager_clear(&server->discoveryManager, server);
 #endif
 
 #if UA_MULTITHREADING >= 100
@@ -206,15 +225,14 @@ void UA_Server_delete(UA_Server *server) {
 #endif
 
     /* Clean up the Admin Session */
-    UA_LOCK(server->serviceMutex);
-    UA_Session_deleteMembersCleanup(&server->adminSession, server);
-    UA_UNLOCK(server->serviceMutex);
+    UA_Session_clear(&server->adminSession, server);
 
-    /* Clean up the work queue */
-    UA_WorkQueue_cleanup(&server->workQueue);
+    UA_UNLOCK(server->serviceMutex); /* The timer has its own mutex */
 
-    /* Delete the timed work */
-    UA_Timer_deleteMembers(&server->timer);
+    /* Execute all remaining delayed events and clean up the timer */
+    UA_Timer_process(&server->timer, UA_DateTime_nowMonotonic() + 1,
+             (UA_TimerExecutionCallback)serverExecuteRepeatedCallback, server);
+    UA_Timer_clear(&server->timer);
 
     /* Clean up the config */
     UA_ServerConfig_clean(&server->config);
@@ -234,7 +252,7 @@ UA_Server_cleanup(UA_Server *server, void *_) {
     UA_LOCK(server->serviceMutex);
     UA_DateTime nowMonotonic = UA_DateTime_nowMonotonic();
     UA_Server_cleanupSessions(server, nowMonotonic);
-    UA_SecureChannelManager_cleanupTimedOut(&server->secureChannelManager, nowMonotonic);
+    UA_Server_cleanupTimedOutSecureChannels(server, nowMonotonic);
 #ifdef UA_ENABLE_DISCOVERY
     UA_Discovery_cleanupTimedOut(server, nowMonotonic);
 #endif
@@ -272,8 +290,6 @@ UA_Server_init(UA_Server *server) {
     /* Initialize the handling of repeated callbacks */
     UA_Timer_init(&server->timer);
 
-    UA_WorkQueue_init(&server->workQueue);
-
     /* Initialize the adminSession */
     UA_Session_init(&server->adminSession);
     server->adminSession.sessionId.identifierType = UA_NODEIDTYPE_GUID;
@@ -292,7 +308,10 @@ UA_Server_init(UA_Server *server) {
     server->namespacesSize = 2;
 
     /* Initialize SecureChannel */
-    UA_SecureChannelManager_init(&server->secureChannelManager, server);
+    TAILQ_INIT(&server->channels);
+    /* TODO: use an ID that is likely to be unique after a restart */
+    server->lastChannelId = STARTCHANNELID;
+    server->lastTokenId = STARTTOKENID;
 
     /* Initialize Session Management */
     LIST_INIT(&server->sessions);
@@ -324,13 +343,16 @@ UA_Server_init(UA_Server *server) {
 }
 
 UA_Server *
-UA_Server_newWithConfig(const UA_ServerConfig *config) {
+UA_Server_newWithConfig(UA_ServerConfig *config) {
     if(!config)
         return NULL;
     UA_Server *server = (UA_Server *)UA_calloc(1, sizeof(UA_Server));
-    if(!server)
+    if(!server) {
+        UA_ServerConfig_clean(config);
         return NULL;
+    }
     server->config = *config;
+    memset(config, 0, sizeof(UA_ServerConfig));
     return UA_Server_init(server);
 }
 
@@ -383,7 +405,7 @@ UA_Server_addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
 
 UA_StatusCode
 changeRepeatedCallbackInterval(UA_Server *server, UA_UInt64 callbackId,
-                                         UA_Double interval_ms) {
+                               UA_Double interval_ms) {
     return UA_Timer_changeRepeatedCallbackInterval(&server->timer, callbackId,
                                                    interval_ms);
 }
@@ -426,7 +448,8 @@ UA_Server_updateCertificate(UA_Server *server,
             if(UA_ByteString_equal(oldCertificate,
                                     &current->session.header.channel->securityPolicy->localCertificate)) {
                 UA_LOCK(server->serviceMutex);
-                UA_Server_removeSessionByToken(server, &current->session.header.authenticationToken);
+                UA_Server_removeSessionByToken(server, &current->session.header.authenticationToken,
+                                               UA_DIAGNOSTICEVENT_CLOSE);
                 UA_UNLOCK(server->serviceMutex);
             }
         }
@@ -434,12 +457,10 @@ UA_Server_updateCertificate(UA_Server *server,
     }
 
     if(closeSecureChannels) {
-        UA_SecureChannelManager *cm = &server->secureChannelManager;
         channel_entry *entry;
-        TAILQ_FOREACH(entry, &cm->channels, pointers) {
-            if(UA_ByteString_equal(&entry->channel.securityPolicy->localCertificate, oldCertificate)){
-                UA_SecureChannelManager_close(cm, entry->channel.securityToken.channelId);
-            }
+        TAILQ_FOREACH(entry, &server->channels, pointers) {
+            if(UA_ByteString_equal(&entry->channel.securityPolicy->localCertificate, oldCertificate))
+                UA_Server_closeSecureChannel(server, &entry->channel, UA_DIAGNOSTICEVENT_CLOSE);
         }
     }
 
@@ -447,9 +468,11 @@ UA_Server_updateCertificate(UA_Server *server,
     while(i < server->config.endpointsSize) {
         UA_EndpointDescription *ed = &server->config.endpoints[i];
         if(UA_ByteString_equal(&ed->serverCertificate, oldCertificate)) {
-            UA_String_deleteMembers(&ed->serverCertificate);
+            UA_String_clear(&ed->serverCertificate);
             UA_String_copy(newCertificate, &ed->serverCertificate);
-            UA_SecurityPolicy *sp = UA_SecurityPolicy_getSecurityPolicyByUri(server, &server->config.endpoints[i].securityPolicyUri);
+            UA_SecurityPolicy *sp =
+                UA_SecurityPolicy_getSecurityPolicyByUri(server,
+                   &server->config.endpoints[i].securityPolicyUri);
             if(!sp)
                 return UA_STATUSCODE_BADINTERNALERROR;
             sp->updateCertificateAndPrivateKey(sp, *newCertificate, *newPrivateKey);
@@ -488,8 +511,11 @@ verifyServerApplicationURI(const UA_Server *server) {
                                  &server->config.applicationDescription.applicationUri);
         if(retval != UA_STATUSCODE_GOOD) {
             UA_LOG_ERROR(&server->config.logger, UA_LOGCATEGORY_SERVER,
-                         "The configured ApplicationURI does not match the URI "
-                         "specified in the certificate for the SecurityPolicy %.*s",
+                         "The configured ApplicationURI \"%.*s\"does not match the "
+                         "ApplicationURI specified in the certificate for the "
+                         "SecurityPolicy %.*s",
+                         (int)server->config.applicationDescription.applicationUri.length,
+                         server->config.applicationDescription.applicationUri.data,
                          (int)sp->policyUri.length, sp->policyUri.data);
             return retval;
         }
@@ -497,6 +523,11 @@ verifyServerApplicationURI(const UA_Server *server) {
     return UA_STATUSCODE_GOOD;
 }
 #endif
+
+UA_ServerStatistics UA_Server_getStatistics(UA_Server *server)
+{
+   return server->serverStats;
+}
 
 /********************/
 /* Main Server Loop */
@@ -513,6 +544,15 @@ verifyServerApplicationURI(const UA_Server *server) {
 
 UA_StatusCode
 UA_Server_run_startup(UA_Server *server) {
+
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    /* Prominently warn user that fuzzing build is enabled. This will tamper with authentication tokens and other important variables
+     * E.g. if fuzzing is enabled, and two clients are connected, subscriptions do not work properly,
+     * since the tokens will be overridden to allow easier fuzzing. */
+    UA_LOG_FATAL(&server->config.logger, UA_LOGCATEGORY_SERVER,
+                       "Server was built with unsafe fuzzing mode. This should only be used for specific fuzzing builds.");
+#endif
+
     /* ensure that the uri for ns1 is set up from the app description */
     setupNs1Uri(server);
 
@@ -557,8 +597,11 @@ UA_Server_run_startup(UA_Server *server) {
     UA_StatusCode result = UA_STATUSCODE_GOOD;
     for(size_t i = 0; i < server->config.networkLayersSize; ++i) {
         UA_ServerNetworkLayer *nl = &server->config.networkLayers[i];
-        result |= nl->start(nl, &server->config.customHostname);
+        nl->statistics = &server->serverStats.ns;
+        result |= nl->start(nl, &server->config.logger, &server->config.customHostname);
     }
+    if(result != UA_STATUSCODE_GOOD)
+        return result;
 
     /* Update the application description to match the previously added discovery urls.
      * We can only do this after the network layer is started since it inits the discovery url */
@@ -578,16 +621,9 @@ UA_Server_run_startup(UA_Server *server) {
         UA_String_copy(&nl->discoveryUrl, &server->config.applicationDescription.discoveryUrls[i]);
     }
 
-    /* Spin up the worker threads */
-#if UA_MULTITHREADING >= 200
-    UA_LOG_INFO(&server->config.logger, UA_LOGCATEGORY_SERVER,
-                "Spinning up %u worker thread(s)", server->config.nThreads);
-    UA_WorkQueue_start(&server->workQueue, server->config.nThreads);
-#endif
-
     /* Start the multicast discovery server */
 #ifdef UA_ENABLE_DISCOVERY_MULTICAST
-    if(server->config.discovery.mdnsEnable)
+    if(server->config.mdnsEnabled)
         startMulticastDiscoveryServer(server);
 #endif
 
@@ -598,12 +634,10 @@ UA_Server_run_startup(UA_Server *server) {
 
 static void
 serverExecuteRepeatedCallback(UA_Server *server, UA_ApplicationCallback cb,
-                        void *callbackApplication, void *data) {
-#if UA_MULTITHREADING >= 200
-    UA_WorkQueue_enqueue(&server->workQueue, cb, callbackApplication, data);
-#else
+                              void *callbackApplication, void *data) {
+    /* Service mutex is not set inside the timer that triggers the callback */
+    UA_LOCK_ASSERT(server->serviceMutex, 0);
     cb(callbackApplication, data);
-#endif
 }
 
 UA_UInt16
@@ -639,12 +673,15 @@ UA_Server_run_iterate(UA_Server *server, UA_Boolean waitInternal) {
         }
     }
 #endif
+
+    UA_LOCK(server->serviceMutex);
+
 #if defined(UA_ENABLE_DISCOVERY_MULTICAST) && (UA_MULTITHREADING < 200)
-    if(server->config.discovery.mdnsEnable) {
-        // TODO multicastNextRepeat does not consider new input data (requests)
-        // on the socket. It will be handled on the next call. if needed, we
-        // need to use select with timeout on the multicast socket
-        // server->mdnsSocket (see example in mdnsd library) on higher level.
+    if(server->config.mdnsEnabled) {
+        /* TODO multicastNextRepeat does not consider new input data (requests)
+         * on the socket. It will be handled on the next call. if needed, we
+         * need to use select with timeout on the multicast socket
+         * server->mdnsSocket (see example in mdnsd library) on higher level. */
         UA_DateTime multicastNextRepeat = 0;
         UA_StatusCode hasNext =
             iterateMulticastDiscoveryServer(server, &multicastNextRepeat, true);
@@ -653,9 +690,7 @@ UA_Server_run_iterate(UA_Server *server, UA_Boolean waitInternal) {
     }
 #endif
 
-#if UA_MULTITHREADING < 200
-    UA_WorkQueue_manuallyProcessDelayed(&server->workQueue);
-#endif
+    UA_UNLOCK(server->serviceMutex);
 
     now = UA_DateTime_nowMonotonic();
     timeout = 0;
@@ -672,22 +707,11 @@ UA_Server_run_shutdown(UA_Server *server) {
         nl->stop(nl, server);
     }
 
-#if UA_MULTITHREADING >= 200
-    /* Shut down the workers */
-    UA_LOG_INFO(&server->config.logger, UA_LOGCATEGORY_SERVER,
-                "Shutting down %u worker thread(s)",
-                (UA_UInt32)server->workQueue.workersSize);
-    UA_WorkQueue_stop(&server->workQueue);
-#endif
-
 #ifdef UA_ENABLE_DISCOVERY_MULTICAST
     /* Stop multicast discovery */
-    if(server->config.discovery.mdnsEnable)
+    if(server->config.mdnsEnabled)
         stopMulticastDiscoveryServer(server);
 #endif
-
-    /* Execute all delayed callbacks */
-    UA_WorkQueue_cleanup(&server->workQueue);
 
     return UA_STATUSCODE_GOOD;
 }
@@ -723,40 +747,3 @@ UA_Server_run(UA_Server *server, const volatile UA_Boolean *running) {
     }
     return UA_Server_run_shutdown(server);
 }
-
-#ifdef UA_ENABLE_HISTORIZING
-/* Allow insert of historical data */
-UA_Boolean
-UA_Server_AccessControl_allowHistoryUpdateUpdateData(UA_Server *server,
-                                                     const UA_NodeId *sessionId, void *sessionContext,
-                                                     const UA_NodeId *nodeId,
-                                                     UA_PerformUpdateType performInsertReplace,
-                                                     const UA_DataValue *value) {
-    if(server->config.accessControl.allowHistoryUpdateUpdateData &&
-            !server->config.accessControl.allowHistoryUpdateUpdateData(server, &server->config.accessControl,
-                                                                       sessionId, sessionContext, nodeId,
-                                                                       performInsertReplace, value)) {
-        return false;
-    }
-    return true;
-}
-
-/* Allow delete of historical data */
-UA_Boolean
-UA_Server_AccessControl_allowHistoryUpdateDeleteRawModified(UA_Server *server,
-                                                            const UA_NodeId *sessionId, void *sessionContext,
-                                                            const UA_NodeId *nodeId,
-                                                            UA_DateTime startTimestamp,
-                                                            UA_DateTime endTimestamp,
-                                                            bool isDeleteModified) {
-    if(server->config.accessControl.allowHistoryUpdateDeleteRawModified &&
-            !server->config.accessControl.allowHistoryUpdateDeleteRawModified(server, &server->config.accessControl,
-                                                                              sessionId, sessionContext, nodeId,
-                                                                              startTimestamp, endTimestamp,
-                                                                              isDeleteModified)) {
-        return false;
-    }
-    return true;
-
-}
-#endif /* UA_ENABLE_HISTORIZING */

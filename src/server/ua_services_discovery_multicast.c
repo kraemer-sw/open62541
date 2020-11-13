@@ -91,8 +91,8 @@ addMdnsRecordForNetworkLayer(UA_Server *server, const UA_String *appName,
 
     retval = UA_Discovery_addRecord(server, appName, &hostname, port,
                                     &path, UA_DISCOVERY_TCP, true,
-                                    server->config.discovery.mdns.serverCapabilities,
-                                    server->config.discovery.mdns.serverCapabilitiesSize,
+                                    server->config.mdnsConfig.serverCapabilities,
+                                    server->config.mdnsConfig.serverCapabilitiesSize,
                                     true);
     if(retval != UA_STATUSCODE_GOOD) {
         UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_NETWORK,
@@ -104,7 +104,7 @@ addMdnsRecordForNetworkLayer(UA_Server *server, const UA_String *appName,
 }
 
 void startMulticastDiscoveryServer(UA_Server *server) {
-    UA_String *appName = &server->config.discovery.mdns.mdnsServerName;
+    UA_String *appName = &server->config.mdnsConfig.mdnsServerName;
     for(size_t i = 0; i < server->config.networkLayersSize; i++)
         addMdnsRecordForNetworkLayer(server, appName, &server->config.networkLayers[i]);
 
@@ -133,7 +133,7 @@ stopMulticastDiscoveryServer(UA_Server *server) {
         if (retval != UA_STATUSCODE_GOOD)
             continue;
 
-        UA_Discovery_removeRecord(server, &server->config.discovery.mdns.mdnsServerName,
+        UA_Discovery_removeRecord(server, &server->config.mdnsConfig.mdnsServerName,
                                   &hostname, port, true);
 
     }
@@ -146,20 +146,29 @@ stopMulticastDiscoveryServer(UA_Server *server) {
 # endif
 }
 
-/* All filter criteria must be fulfilled */
+/* All filter criteria must be fulfilled in the list entry. The comparison is case 
+ * insensitive.
+ * @returns true if the entry matches the filter. False if the filter does not match.
+ * */
 static UA_Boolean
-filterServerRecord(size_t serverCapabilityFilterSize, UA_String *serverCapabilityFilter,
+entryMatchesCapabilityFilter(size_t serverCapabilityFilterSize, UA_String *serverCapabilityFilter,
                    serverOnNetwork_list_entry* current) {
-    // if the element has no capabilities defined, but the filter expects some, then do not use this entry
-    if (serverCapabilityFilterSize > 0 && current->serverOnNetwork.serverCapabilitiesSize == 0)
-        return false;
+    // if the entry has less capabilities defined than the filter, there's no match
+    if (serverCapabilityFilterSize > current->serverOnNetwork.serverCapabilitiesSize)
+        return UA_FALSE;
     for(size_t i = 0; i < serverCapabilityFilterSize; i++) {
-        for(size_t j = 0; j < current->serverOnNetwork.serverCapabilitiesSize; j++)
-            if(!UA_String_equal(&serverCapabilityFilter[i],
-                                &current->serverOnNetwork.serverCapabilities[j]))
-                return false;
+        UA_Boolean capabilityFound = UA_FALSE;
+        for(size_t j = 0; j < current->serverOnNetwork.serverCapabilitiesSize; j++) {
+            if(UA_String_equal_ignorecase(&serverCapabilityFilter[i],
+                               &current->serverOnNetwork.serverCapabilities[j])) {
+                capabilityFound = UA_TRUE;
+                break;
+            }
+        }
+        if (!capabilityFound)
+            return UA_FALSE; // entry does not match capability
     }
-    return true;
+    return UA_TRUE;
 }
 
 void Service_FindServersOnNetwork(UA_Server *server, UA_Session *session,
@@ -167,7 +176,7 @@ void Service_FindServersOnNetwork(UA_Server *server, UA_Session *session,
                                   UA_FindServersOnNetworkResponse *response) {
     UA_LOCK_ASSERT(server->serviceMutex, 1);
 
-    if (!server->config.discovery.mdnsEnable) {
+    if (!server->config.mdnsEnabled) {
         response->responseHeader.serviceResult = UA_STATUSCODE_BADNOTIMPLEMENTED;
         return;
     }
@@ -197,7 +206,7 @@ void Service_FindServersOnNetwork(UA_Server *server, UA_Session *session,
             break;
         if(current->serverOnNetwork.recordId < request->startingRecordId)
             continue;
-        if(!filterServerRecord(request->serverCapabilityFilterSize,
+        if(!entryMatchesCapabilityFilter(request->serverCapabilityFilterSize,
                                request->serverCapabilityFilter, current))
             continue;
         filtered[filteredCount++] = &current->serverOnNetwork;
@@ -310,6 +319,11 @@ createFullServiceDomain(char *outServiceDomain, size_t maxLen,
                     (int) servernameLen, (char *) servername->data,
                     (int) hostnameLen, (char *) hostname->data);
         offset = servernameLen + hostnameLen + 1;
+        //replace all dots with minus. Otherwise mDNS is not valid
+        for (size_t i=servernameLen+1; i<offset; i++) {
+            if (outServiceDomain[i] == '.')
+                outServiceDomain[i] = '-';
+        }
     }
     else {
         UA_snprintf(outServiceDomain, maxLen + 1, "%.*s",

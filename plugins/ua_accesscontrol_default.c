@@ -3,13 +3,19 @@
  *
  *    Copyright 2016-2017 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
+ *    Copyright 2019 (c) HMS Industrial Networks AB (Author: Jonas Green)
  */
 
 #include <open62541/plugin/accesscontrol_default.h>
-#include <open62541/server_config.h>
 
 /* Example access control management. Anonymous and username / password login.
- * The access rights are maximally permissive. */
+ * The access rights are maximally permissive.
+ *
+ * FOR PRODUCTION USE, THIS EXAMPLE PLUGIN SHOULD BE REPLACED WITH LESS
+ * PERMISSIVE ACCESS CONTROL.
+ *
+ * For TransferSubscriptions, we check whether the transfer happens between
+ * Sessions for the same user. */
 
 typedef struct {
     UA_Boolean allowAnonymous;
@@ -98,8 +104,11 @@ activateSession_default(UA_Server *server, UA_AccessControl *ac,
         if(!match)
             return UA_STATUSCODE_BADUSERACCESSDENIED;
 
-        /* No userdata atm */
-        *sessionContext = NULL;
+        /* For the CTT, recognize whether two sessions are  */
+        UA_ByteString *username = UA_ByteString_new();
+        if(username)
+            UA_ByteString_copy(&userToken->userName, username);
+        *sessionContext = username;
         return UA_STATUSCODE_GOOD;
     }
 
@@ -110,7 +119,8 @@ activateSession_default(UA_Server *server, UA_AccessControl *ac,
 static void
 closeSession_default(UA_Server *server, UA_AccessControl *ac,
                      const UA_NodeId *sessionId, void *sessionContext) {
-    /* no context to clean up */
+    if(sessionContext)
+        UA_ByteString_delete((UA_ByteString*)sessionContext);
 }
 
 static UA_UInt32
@@ -170,6 +180,27 @@ allowDeleteReference_default(UA_Server *server, UA_AccessControl *ac,
     return true;
 }
 
+static UA_Boolean
+allowBrowseNode_default(UA_Server *server, UA_AccessControl *ac,
+                        const UA_NodeId *sessionId, void *sessionContext,
+                        const UA_NodeId *nodeId, void *nodeContext) {
+    return true;
+}
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+static UA_Boolean
+allowTransferSubscription_default(UA_Server *server, UA_AccessControl *ac,
+                                  const UA_NodeId *oldSessionId, void *oldSessionContext,
+                                  const UA_NodeId *newSessionId, void *newSessionContext) {
+    if(oldSessionContext == newSessionContext)
+        return true;
+    if(oldSessionContext && newSessionContext)
+        return UA_ByteString_equal((UA_ByteString*)oldSessionContext,
+                                   (UA_ByteString*)newSessionContext);
+    return false;
+}
+#endif
+
 #ifdef UA_ENABLE_HISTORIZING
 static UA_Boolean
 allowHistoryUpdateUpdateData_default(UA_Server *server, UA_AccessControl *ac,
@@ -206,8 +237,8 @@ static void clear_default(UA_AccessControl *ac) {
 
     if (context) {
         for(size_t i = 0; i < context->usernamePasswordLoginSize; i++) {
-            UA_String_deleteMembers(&context->usernamePasswordLogin[i].username);
-            UA_String_deleteMembers(&context->usernamePasswordLogin[i].password);
+            UA_String_clear(&context->usernamePasswordLogin[i].username);
+            UA_String_clear(&context->usernamePasswordLogin[i].password);
         }
         if(context->usernamePasswordLoginSize > 0)
             UA_free(context->usernamePasswordLogin);
@@ -221,6 +252,8 @@ UA_AccessControl_default(UA_ServerConfig *config, UA_Boolean allowAnonymous,
                          const UA_ByteString *userTokenPolicyUri,
                          size_t usernamePasswordLoginSize,
                          const UA_UsernamePasswordLogin *usernamePasswordLogin) {
+    UA_LOG_WARNING(&config->logger, UA_LOGCATEGORY_SERVER,
+                   "AccessControl: Unconfigured AccessControl. Users have all permissions.");
     UA_AccessControl *ac = &config->accessControl;
     ac->clear = clear_default;
     ac->activateSession = activateSession_default;
@@ -231,6 +264,11 @@ UA_AccessControl_default(UA_ServerConfig *config, UA_Boolean allowAnonymous,
     ac->getUserExecutableOnObject = getUserExecutableOnObject_default;
     ac->allowAddNode = allowAddNode_default;
     ac->allowAddReference = allowAddReference_default;
+    ac->allowBrowseNode = allowBrowseNode_default;
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+    ac->allowTransferSubscription = allowTransferSubscription_default;
+#endif
 
 #ifdef UA_ENABLE_HISTORIZING
     ac->allowHistoryUpdateUpdateData = allowHistoryUpdateUpdateData_default;
@@ -242,13 +280,17 @@ UA_AccessControl_default(UA_ServerConfig *config, UA_Boolean allowAnonymous,
 
     AccessControlContext *context = (AccessControlContext*)
             UA_malloc(sizeof(AccessControlContext));
-    if (!context)
+    if(!context)
         return UA_STATUSCODE_BADOUTOFMEMORY;
     memset(context, 0, sizeof(AccessControlContext));
     ac->context = context;
 
     /* Allow anonymous? */
     context->allowAnonymous = allowAnonymous;
+    if(allowAnonymous) {
+        UA_LOG_INFO(&config->logger, UA_LOGCATEGORY_SERVER,
+                    "AccessControl: Anonymous login is enabled");
+    }
 
     /* Copy username/password to the access control plugin */
     if(usernamePasswordLoginSize > 0) {

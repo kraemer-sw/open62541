@@ -9,8 +9,8 @@
 #ifndef UA_PLUGIN_NETWORK_H_
 #define UA_PLUGIN_NETWORK_H_
 
+#include <open62541/util.h>
 #include <open62541/plugin/log.h>
-#include <open62541/server.h>
 
 _UA_BEGIN_DECLS
 
@@ -51,12 +51,12 @@ typedef struct {
 } UA_ConnectionConfig;
 
 typedef enum {
-    UA_CONNECTION_CLOSED,     /* The socket has been closed and the connection
-                               * will be deleted */
-    UA_CONNECTION_OPENING,    /* The socket is open, but the HEL/ACK handshake
-                               * is not done */
-    UA_CONNECTION_ESTABLISHED /* The socket is open and the connection
-                               * configured */
+    UA_CONNECTIONSTATE_CLOSED,     /* The socket has been closed and the connection
+                                    * will be deleted */
+    UA_CONNECTIONSTATE_OPENING,    /* The socket is open, but the HEL/ACK handshake
+                                    * is not done */
+    UA_CONNECTIONSTATE_ESTABLISHED /* The socket is open and the connection
+                                    * configured */
 } UA_ConnectionState;
 
 struct UA_Connection {
@@ -68,7 +68,7 @@ struct UA_Connection {
                                     * simplifies the design. */
     UA_DateTime openingDate;       /* The date the connection was created */
     void *handle;                  /* A pointer to internal data */
-    UA_UInt64 connectCallbackID;   /* Callback Id, for the connect-loop */
+
     /* Get a buffer for sending */
     UA_StatusCode (*getSendBuffer)(UA_Connection *connection, size_t length,
                                    UA_ByteString *buf);
@@ -149,6 +149,9 @@ UA_Server_removeConnection(UA_Server *server, UA_Connection *connection);
 struct UA_ServerNetworkLayer {
     void *handle; /* Internal data */
 
+    /* Points to external memory, i.e. handled by server or client */
+    UA_NetworkStatistics *statistics;
+
     UA_String discoveryUrl;
 
     UA_ConnectionConfig localConnectionConfig;
@@ -157,7 +160,8 @@ struct UA_ServerNetworkLayer {
      *
      * @param nl The network layer
      * @return Returns UA_STATUSCODE_GOOD or an error code. */
-    UA_StatusCode (*start)(UA_ServerNetworkLayer *nl, const UA_String *customHostname);
+    UA_StatusCode (*start)(UA_ServerNetworkLayer *nl, const UA_Logger *logger,
+                           const UA_String *customHostname);
 
     /* Listen for new and closed connections and arriving packets. Calls
      * UA_Server_processBinaryMessage for the arriving packets. Closed
@@ -198,7 +202,7 @@ struct UA_ServerNetworkLayer {
  * @param logger the logger to use */
 typedef UA_Connection
 (*UA_ConnectClientConnection)(UA_ConnectionConfig config, UA_String endpointUrl,
-                              UA_UInt32 timeout, UA_Logger *logger);
+                              UA_UInt32 timeout, const UA_Logger *logger);
 
 _UA_END_DECLS
 

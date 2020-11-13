@@ -9,8 +9,6 @@
 #ifndef PLUGINS_ARCH_WEC7_UA_ARCHITECTURE_H_
 #define PLUGINS_ARCH_WEC7_UA_ARCHITECTURE_H_
 
-#include <open62541/architecture_base.h>
-
 #ifndef _BSD_SOURCE
 # define _BSD_SOURCE
 #endif
@@ -55,7 +53,9 @@ char *strerror(int errnum);
 
 #define ssize_t int
 #define OPTVAL_TYPE char
-#ifndef UA_sleep_ms
+#ifdef UA_sleep_ms
+void UA_sleep_ms(unsigned long ms);
+#else
 # define UA_sleep_ms(X) Sleep(X)
 #endif
 
@@ -112,18 +112,13 @@ char *strerror(int errnum);
 
 #ifndef UA_free
 #define UA_free free
-#endif
-#ifndef UA_malloc
 #define UA_malloc malloc
-#endif
-#ifndef UA_calloc
 #define UA_calloc calloc
-#endif
-#ifndef UA_realloc
 #define UA_realloc realloc
 #endif
 
 #define UA_snprintf(source, size, string, ...) _snprintf_s(source, size, _TRUNCATE, string, __VA_ARGS__)
+#define UA_strncasecmp _strnicmp
 
 #define UA_LOG_SOCKET_ERRNO_WRAP(LOG) { \
     LPVOID errno_str = NULL; \

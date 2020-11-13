@@ -226,7 +226,7 @@ Main Build Options
   - 100-199: API functions marked with the UA_THREADSAFE-macro are protected internally with mutexes.
     Multiple threads are allowed to call these functions of the SDK at the same time without causing race conditions.
     Furthermore, this level support the handling of asynchronous method calls from external worker threads.
-  - >=200: Work is distributed to a number of internal worker threads. Those worker threads are created within the SDK.
+  - >=200: Work is distributed to a number of internal worker threads. Currently only used for mDNS discovery.
     (EXPERIMENTAL FEATURE! Expect bugs.)
 
 Select build artefacts
@@ -259,6 +259,10 @@ Detailed SDK Features
 
 **UA_ENABLE_METHODCALLS**
    Enable the Method service set
+
+**UA_ENABLE_PARSING**
+   Enable parsing human readable formats of builtin data types (Guid, NodeId, etc.).
+   Utility functions that are not essential to the SDK.
 
 **UA_ENABLE_NODEMANAGEMENT**
    Enable dynamic addition and removal of nodes at runtime

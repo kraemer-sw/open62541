@@ -20,7 +20,8 @@ static void
 methodCalled(UA_Client *client, void *userdata, UA_UInt32 requestId,
     UA_CallResponse *response) {
     UA_UInt32 i;
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "**** CallRequest Response - Req:%u with %u results",
+    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                "**** CallRequest Response - Req:%u with %u results",
         requestId, (UA_UInt32)response->resultsSize);
     UA_StatusCode retval = response->responseHeader.serviceResult;
     if (retval == UA_STATUSCODE_GOOD) {
@@ -31,7 +32,8 @@ methodCalled(UA_Client *client, void *userdata, UA_UInt32 requestId,
                 retval = UA_STATUSCODE_BADUNEXPECTEDERROR;
             if (retval != UA_STATUSCODE_GOOD) {
                 UA_CallResponse_clear(response);
-                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "**** CallRequest Response - Req: %u (%u) failed", requestId,i);
+                UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
+                            "**** CallRequest Response - Req: %u (%u) failed", requestId,i);
                 if (i == response->resultsSize)
                     return;
                 else
@@ -121,6 +123,7 @@ static void stopHandler(int sign) {
     running = 0;
 }
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS
 static void
 handler_currentTimeChanged(UA_Client *client, UA_UInt32 subId, void *subContext,
     UA_UInt32 monId, void *monContext, UA_DataValue *value) {
@@ -144,26 +147,16 @@ static void
 subscriptionInactivityCallback(UA_Client *client, UA_UInt32 subId, void *subContext) {
     UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Inactivity for subscription %u", subId);
 }
+#endif
 
 static void
-stateCallback(UA_Client *client, UA_ClientState clientState) {
-    switch (clientState) {
-    case UA_CLIENTSTATE_DISCONNECTED:
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "The client is disconnected");
-        break;
-    case UA_CLIENTSTATE_WAITING_FOR_ACK:
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Waiting for ack");
-        break;
-    case UA_CLIENTSTATE_CONNECTED:
+stateCallback(UA_Client *client, UA_SecureChannelState channelState,
+              UA_SessionState sessionState, UA_StatusCode connectStatus) {
+    if(sessionState == UA_SESSIONSTATE_ACTIVATED) {
         UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-            "A TCP connection to the server is open");
-        break;
-    case UA_CLIENTSTATE_SECURECHANNEL:
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-            "A SecureChannel to the server is open");
-        break;
-    case UA_CLIENTSTATE_SESSION: {
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "A session with the server is open");
+                    "A session with the server is activated");
+
+#ifdef UA_ENABLE_SUBSCRIPTIONS
         /* A new session was created. We need to create the subscription. */
         /* Create a subscription */
         UA_CreateSubscriptionRequest request = UA_CreateSubscriptionRequest_default();
@@ -188,6 +181,7 @@ stateCallback(UA_Client *client, UA_ClientState clientState) {
             UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
                 "Monitoring UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME', id %u",
                 monResponse.monitoredItemId);
+#endif
 
         //TODO: check the existance of the nodes inside these functions (otherwise seg faults)
 #ifdef UA_ENABLE_METHODCALLS		
@@ -219,17 +213,9 @@ stateCallback(UA_Client *client, UA_ClientState clientState) {
 
 #endif /* UA_ENABLE_METHODCALLS */
     }
-    break;
-    case UA_CLIENTSTATE_SESSION_RENEWED:
-        UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-            "A session with the server is open (renewed)");
-        /* The session was renewed. We don't need to recreate the subscription. */
-        break;
-    case UA_CLIENTSTATE_SESSION_DISCONNECTED:
+
+    if(sessionState == UA_SESSIONSTATE_CLOSED)
         UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND, "Session disconnected");
-        break;
-    }
-    return;
 }
 
 int
@@ -245,7 +231,9 @@ main(int argc, char *argv[]) {
 
     /* Set stateCallback */
     cc->stateCallback = stateCallback;
+#ifdef UA_ENABLE_SUBSCRIPTIONS
     cc->subscriptionInactivityCallback = subscriptionInactivityCallback;
+#endif
 
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
     if(retval != UA_STATUSCODE_GOOD) {

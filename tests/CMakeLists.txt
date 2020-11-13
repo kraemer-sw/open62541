@@ -1,7 +1,7 @@
 # Load CMake Packages
 find_package(Check REQUIRED)
 set(LIBS ${CHECK_LIBRARIES} ${open62541_LIBRARIES})
-if(NOT WIN32 AND NOT APPLE)
+if(NOT WIN32 AND NOT APPLE AND NOT (CMAKE_HOST_SYSTEM_NAME MATCHES "OpenBSD"))
   list(APPEND LIBS subunit)
 endif()
 
@@ -9,11 +9,6 @@ include_directories(${CHECK_INCLUDE_DIR})
 #find_package(Threads REQUIRED)
 if(NOT MSVC AND UA_ENABLE_UNIT_TESTS_MEMCHECK)
     find_package(Valgrind REQUIRED)
-endif()
-
-if(CMAKE_HOST_SYSTEM_NAME MATCHES "OpenBSD")
-    link_directories(/usr/local/lib)
-    add_definitions(-Wno-gnu-zero-variadic-macro-arguments)
 endif()
 
 if(APPLE)
@@ -34,9 +29,20 @@ include_directories("${CMAKE_CURRENT_SOURCE_DIR}/testing-plugins")
 include_directories("${PROJECT_BINARY_DIR}")
 include_directories("${PROJECT_BINARY_DIR}/../plugins")
 
-if(UA_ENABLE_ENCRYPTION)
+if(UA_ENABLE_ENCRYPTION_MBEDTLS)
     # mbedtls includes
     include_directories(${MBEDTLS_INCLUDE_DIRS})
+endif()
+
+if(UA_ENABLE_ENCRYPTION_OPENSSL)
+    # openssl includes
+    include_directories(${OPENSSL_INCLUDE_DIR})
+endif()
+
+if(CMAKE_HOST_SYSTEM_NAME MATCHES "OpenBSD")
+    include_directories(AFTER /usr/local/include)
+    link_directories(AFTER /usr/local/lib)
+    add_definitions(-Wno-gnu-zero-variadic-macro-arguments)
 endif()
 
 add_definitions(-DUA_sleep_ms=UA_comboSleep)
@@ -59,10 +65,10 @@ set(test_plugin_sources ${PROJECT_SOURCE_DIR}/arch/network_tcp.c
     ${PROJECT_SOURCE_DIR}/plugins/ua_log_stdout.c
     ${PROJECT_SOURCE_DIR}/plugins/ua_config_default.c
     ${PROJECT_SOURCE_DIR}/plugins/ua_accesscontrol_default.c
-    ${PROJECT_SOURCE_DIR}/plugins/ua_pki_default.c
     ${PROJECT_SOURCE_DIR}/plugins/ua_nodestore_ziptree.c
     ${PROJECT_SOURCE_DIR}/plugins/ua_nodestore_hashmap.c
-    ${PROJECT_SOURCE_DIR}/plugins/securityPolicies/ua_securitypolicy_none.c
+    ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_securitypolicy_none.c
+    ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_pki_none.c
     ${PROJECT_SOURCE_DIR}/tests/testing-plugins/testing_policy.c
     ${PROJECT_SOURCE_DIR}/tests/testing-plugins/testing_networklayers.c
     )
@@ -74,12 +80,29 @@ if(UA_ENABLE_HISTORIZING)
         ${PROJECT_SOURCE_DIR}/plugins/historydata/ua_history_database_default.c)
 endif()
 
-if(UA_ENABLE_ENCRYPTION)
+if(UA_ENABLE_ENCRYPTION_MBEDTLS)
   list(APPEND test_plugin_sources
-       ${PROJECT_SOURCE_DIR}/plugins/securityPolicies/securitypolicy_mbedtls_common.c
-              ${PROJECT_SOURCE_DIR}/plugins/securityPolicies/ua_securitypolicy_basic128rsa15.c
-              ${PROJECT_SOURCE_DIR}/plugins/securityPolicies/ua_securitypolicy_basic256.c
-              ${PROJECT_SOURCE_DIR}/plugins/securityPolicies/ua_securitypolicy_basic256sha256.c)
+       ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/securitypolicy_mbedtls_common.c
+       ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/ua_securitypolicy_basic128rsa15.c
+       ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/ua_securitypolicy_basic256.c
+       ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/ua_securitypolicy_basic256sha256.c
+       ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/ua_securitypolicy_aes128sha256rsaoaep.c
+       ${PROJECT_SOURCE_DIR}/plugins/crypto/mbedtls/ua_pki_mbedtls.c)
+endif()
+
+if(UA_ENABLE_ENCRYPTION_OPENSSL)
+  list(APPEND test_plugin_sources
+              ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/securitypolicy_openssl_common.c
+              ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/ua_openssl_basic128rsa15.c
+              ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/ua_openssl_basic256.c
+              ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/ua_openssl_basic256sha256.c
+              ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/ua_openssl_aes128sha256rsaoaep.c
+              ${PROJECT_SOURCE_DIR}/plugins/crypto/openssl/ua_pki_openssl.c)
+endif()
+
+if(UA_ENABLE_PUBSUB)
+  list(APPEND test_plugin_sources
+              ${PROJECT_SOURCE_DIR}/plugins/ua_pubsub_udp.c)
 endif()
 
 add_library(open62541-testplugins OBJECT ${test_plugin_sources} ${PROJECT_SOURCE_DIR}/arch/${UA_ARCHITECTURE}/ua_architecture_functions.c)
@@ -130,6 +153,13 @@ endmacro()
 
 add_custom_target(test-verbose COMMAND ${CMAKE_CTEST_COMMAND} --verbose)
 
+if(UA_ENABLE_PUBSUB)
+    if(UA_ENABLE_PUBSUB_ETH_UADP_XDP)
+        list(APPEND open62541_LIBRARIES ${XDP_LIBRARY})
+        list(APPEND LIBS elf)
+    endif()
+endif()
+
 # the unit test are built directly on the open62541 object files. so they can
 # access symbols that are hidden/not exported to the shared library
 
@@ -160,6 +190,12 @@ add_test_valgrind(types_memory ${TESTS_BINARY_DIR}/check_types_memory)
 add_executable(check_types_range check_types_range.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
 target_link_libraries(check_types_range ${LIBS})
 add_test_valgrind(types_range ${TESTS_BINARY_DIR}/check_types_range)
+
+if(UA_ENABLE_PARSING)
+    add_executable(check_types_parse check_types_parse.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
+    target_link_libraries(check_types_parse ${LIBS})
+    add_test_valgrind(types_parse ${TESTS_BINARY_DIR}/check_types_parse)
+endif()
 
 add_executable(check_types_custom check_types_custom.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
 target_link_libraries(check_types_custom ${LIBS})
@@ -319,6 +355,9 @@ if(UA_ENABLE_PUBSUB)
     add_executable(check_pubsub_publish_uadp pubsub/check_pubsub_publish_uadp.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
     target_link_libraries(check_pubsub_publish_uadp ${LIBS})
     add_test_valgrind(pubsub_publish ${TESTS_BINARY_DIR}/check_pubsub_publish_uadp)
+    add_executable(check_pubsub_get_state pubsub/check_pubsub_get_state.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+    target_link_libraries(check_pubsub_get_state ${LIBS})
+    add_test_valgrind(check_pubsub_get_state ${TESTS_BINARY_DIR}/check_pubsub_get_state)
 
     #Link libraries for executing subscriber unit test
     add_executable(check_pubsub_subscribe pubsub/check_pubsub_subscribe.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
@@ -332,19 +371,52 @@ if(UA_ENABLE_PUBSUB)
     add_executable(check_pubsub_publish_rt_levels pubsub/check_pubsub_publish_rt_levels.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
     target_link_libraries(check_pubsub_publish_rt_levels ${LIBS})
     add_test_valgrind(check_pubsub_publish_rt_levels ${TESTS_BINARY_DIR}/check_pubsub_publish_rt_levels)
+    add_executable(check_pubsub_subscribe_config_freeze pubsub/check_pubsub_subscribe_config_freeze.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+    target_link_libraries(check_pubsub_subscribe_config_freeze ${LIBS})
+    add_test_valgrind(check_pubsub_subscribe_config_freeze ${TESTS_BINARY_DIR}/check_pubsub_subscribe_config_freeze)
+    add_executable(check_pubsub_subscribe_rt_levels pubsub/check_pubsub_subscribe_rt_levels.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+    target_link_libraries(check_pubsub_subscribe_rt_levels ${LIBS})
+    add_test_valgrind(check_pubsub_subscribe_rt_levels ${TESTS_BINARY_DIR}/check_pubsub_subscribe_rt_levels)
+    add_executable(check_pubsub_multiple_subscribe_rt_levels pubsub/check_pubsub_multiple_subscribe_rt_levels.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+    target_link_libraries(check_pubsub_multiple_subscribe_rt_levels ${LIBS})
+    add_test_valgrind(check_pubsub_multiple_subscribe_rt_levels ${TESTS_BINARY_DIR}/check_pubsub_multiple_subscribe_rt_levels)
 
     add_executable(check_pubsub_multiple_layer pubsub/check_pubsub_multiple_layer.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
     target_link_libraries(check_pubsub_multiple_layer ${LIBS})
     add_test_valgrind(pubsub_multiple_layer ${TESTS_BINARY_DIR}/check_pubsub_multiple_layer)
 
+    if(UA_ENABLE_PUBSUB_ETH_UADP)
+        if(NOT UA_ENABLE_PUBSUB_ETH_UADP_ETF)
+            add_executable(check_pubsub_connection_ethernet pubsub/check_pubsub_connection_ethernet.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+            target_link_libraries(check_pubsub_connection_ethernet ${LIBS})
+            add_test_valgrind(pubsub_connection_ethernet ${TESTS_BINARY_DIR}/check_pubsub_connection_ethernet)
+            add_executable(check_pubsub_publish_ethernet pubsub/check_pubsub_publish_ethernet.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+            target_link_libraries(check_pubsub_publish_ethernet ${LIBS})
+            add_test_valgrind(pubsub_publish_ethernet ${TESTS_BINARY_DIR}/check_pubsub_publish_ethernet)
+        endif()
+        if(UA_ENABLE_PUBSUB_ETH_UADP_XDP)
+            add_executable(check_pubsub_connection_xdp pubsub/check_pubsub_connection_xdp.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+            target_link_libraries(check_pubsub_connection_xdp ${LIBS})
+            add_test_valgrind(pubsub_connection_xdp ${TESTS_BINARY_DIR}/check_pubsub_connection_xdp)
+        endif()
+    endif()
+    if(UA_ENABLE_PUBSUB_ETH_UADP_ETF)
+        add_executable(check_pubsub_connection_ethernet_etf pubsub/check_pubsub_connection_ethernet_etf.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+        target_link_libraries(check_pubsub_connection_ethernet_etf ${LIBS})
+        add_test_valgrind(pubsub_connection_ethernet_etf ${TESTS_BINARY_DIR}/check_pubsub_connection_ethernet_etf)
+        add_executable(check_pubsub_publish_ethernet_etf pubsub/check_pubsub_publish_ethernet_etf.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+        target_link_libraries(check_pubsub_publish_ethernet_etf ${LIBS})
+        add_test_valgrind(pubsub_publish_ethernet_etf ${TESTS_BINARY_DIR}/check_pubsub_publish_ethernet_etf)
+    endif()
+
     if(UA_ENABLE_PUBSUB_INFORMATIONMODEL)
         add_executable(check_pubsub_informationmodel pubsub/check_pubsub_informationmodel.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
         target_link_libraries(check_pubsub_informationmodel ${LIBS})
-        add_test(check_pubsub_informationmodel ${TESTS_BINARY_DIR}/check_pubsub_informationmodel)
+        add_test_valgrind(check_pubsub_informationmodel ${TESTS_BINARY_DIR}/check_pubsub_informationmodel)
         if(UA_ENABLE_PUBSUB_INFORMATIONMODEL_METHODS)
             add_executable(check_pubsub_informationmodel_methods pubsub/check_pubsub_informationmodel_methods.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
             target_link_libraries(check_pubsub_informationmodel_methods ${LIBS})
-            add_test(check_pubsub_informationmodel_methods ${TESTS_BINARY_DIR}/check_pubsub_informationmodel_methods)
+            add_test_valgrind(check_pubsub_informationmodel_methods ${TESTS_BINARY_DIR}/check_pubsub_informationmodel_methods)
 
         endif()
     endif()
@@ -354,6 +426,11 @@ if(UA_ENABLE_PUBSUB)
             target_link_libraries(check_pubsub_connection_mqtt ${LIBS})
             add_test_valgrind(pubsub_connection_mqtt ${TESTS_BINARY_DIR}/check_pubsub_connection_mqtt)
         endif()
+    endif()
+    if(UA_ENABLE_PUBSUB_FILE_CONFIG)
+        add_executable(check_pubsub_configuration pubsub/check_pubsub_configuration.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-plugins>)
+        target_link_libraries(check_pubsub_configuration ${LIBS})
+        add_test_valgrind(pubsub_configuration ${TESTS_BINARY_DIR}/check_pubsub_configuration)
     endif()
 endif()
 
@@ -369,6 +446,12 @@ if(UA_ENABLE_SUBSCRIPTIONS)
     add_executable(check_server_monitoringspeed server/check_server_monitoringspeed.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
     target_link_libraries(check_server_monitoringspeed ${LIBS})
     add_test_no_valgrind(server_monitoringspeed ${TESTS_BINARY_DIR}/check_server_monitoringspeed)
+endif()
+
+if(UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS)
+    add_executable(check_server_alarmsconditions server/check_server_alarmsconditions.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
+    target_link_libraries(check_server_alarmsconditions ${LIBS})
+    add_test_no_valgrind(check_server_alarmsconditions ${TESTS_BINARY_DIR}/check_server_alarmsconditions)
 endif()
 
 if(UA_ENABLE_ASYNCOPERATIONS)
@@ -413,7 +496,7 @@ endif()
 
 # Test Encryption
 
-if(UA_ENABLE_ENCRYPTION)
+if(UA_ENABLE_ENCRYPTION_MBEDTLS)
     add_executable(check_encryption_basic128rsa15 encryption/check_encryption_basic128rsa15.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
     target_link_libraries(check_encryption_basic128rsa15 ${LIBS})
     add_test_valgrind(encryption_basic128rsa15 ${TESTS_BINARY_DIR}/check_encryption_basic128rsa15)
@@ -421,6 +504,24 @@ if(UA_ENABLE_ENCRYPTION)
     add_executable(check_encryption_basic256sha256 encryption/check_encryption_basic256sha256.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
     target_link_libraries(check_encryption_basic256sha256 ${LIBS})
     add_test_valgrind(encryption_basic256sha256 ${TESTS_BINARY_DIR}/check_encryption_basic256sha256)
+
+    add_executable(check_encryption_aes128sha256rsaoaep encryption/check_encryption_aes128sha256rsaoaep.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
+    target_link_libraries(check_encryption_aes128sha256rsaoaep ${LIBS})
+    add_test_valgrind(encryption_aes128sha256rsaoaep ${TESTS_BINARY_DIR}/check_encryption_aes128sha256rsaoaep)
+endif()
+
+if(UA_ENABLE_ENCRYPTION_OPENSSL)
+    add_executable(check_encryption_basic128rsa15 encryption/check_encryption_basic128rsa15.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
+    target_link_libraries(check_encryption_basic128rsa15 ${LIBS})
+    add_test_valgrind(encryption_basic128rsa15 ${TESTS_BINARY_DIR}/check_encryption_basic128rsa15)
+    
+    add_executable(check_encryption_basic256sha256 encryption/check_encryption_basic256sha256.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
+    target_link_libraries(check_encryption_basic256sha256 ${LIBS})
+    add_test_valgrind(encryption_basic256sha256 ${TESTS_BINARY_DIR}/check_encryption_basic256sha256)
+
+    add_executable(check_encryption_aes128sha256rsaoaep encryption/check_encryption_aes128sha256rsaoaep.c $<TARGET_OBJECTS:open62541-object> $<TARGET_OBJECTS:open62541-testplugins>)
+    target_link_libraries(check_encryption_aes128sha256rsaoaep ${LIBS})
+    add_test_valgrind(encryption_aes128sha256rsaoaep ${TESTS_BINARY_DIR}/check_encryption_aes128sha256rsaoaep)
 endif()
 
 # Tests for Nodeset Compiler

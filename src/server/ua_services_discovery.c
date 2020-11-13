@@ -392,7 +392,7 @@ process_RegisterServer(UA_Server *server, UA_Session *session,
     }
 
 #ifdef UA_ENABLE_DISCOVERY_MULTICAST
-    if(server->config.discovery.mdnsEnable) {
+    if(server->config.mdnsEnabled) {
         for(size_t i = 0; i < requestServer->discoveryUrlsSize; i++) {
             /* create TXT if is online and first index, delete TXT if is offline and last index */
             UA_Boolean updateTxt = (requestServer->isOnline && i==0) ||
@@ -426,14 +426,8 @@ process_RegisterServer(UA_Server *server, UA_Session *session,
         // server found, remove from list
         LIST_REMOVE(registeredServer_entry, pointers);
         UA_RegisteredServer_clear(&registeredServer_entry->registeredServer);
-#if UA_MULTITHREADING >= 200
-        UA_atomic_subSize(&server->discoveryManager.registeredServersSize, 1);
-        registeredServer_entry->delayedCleanup.callback = NULL; /* only free the structure */
-        UA_WorkQueue_enqueueDelayed(&server->workQueue, &registeredServer_entry->delayedCleanup);
-#else
         UA_free(registeredServer_entry);
         server->discoveryManager.registeredServersSize--;
-#endif
         responseHeader->serviceResult = UA_STATUSCODE_GOOD;
         return;
     }
@@ -510,8 +504,8 @@ void UA_Discovery_cleanupTimedOut(UA_Server *server, UA_DateTime nowMonotonic) {
     UA_DateTime timedOut = nowMonotonic;
     // registration is timed out if lastSeen is older than 60 minutes (default
     // value, can be modified by user).
-    if(server->config.discovery.cleanupTimeout)
-        timedOut -= server->config.discovery.cleanupTimeout*UA_DATETIME_SEC;
+    if(server->config.discoveryCleanupTimeout)
+        timedOut -= server->config.discoveryCleanupTimeout * UA_DATETIME_SEC;
 
     registeredServer_list_entry* current, *temp;
     LIST_FOREACH_SAFE(current, &server->discoveryManager.registeredServers, pointers, temp) {
@@ -535,7 +529,7 @@ void UA_Discovery_cleanupTimedOut(UA_Server *server, UA_DateTime nowMonotonic) {
         }
 #endif
 
-        if(semaphoreDeleted || (server->config.discovery.cleanupTimeout &&
+        if(semaphoreDeleted || (server->config.discoveryCleanupTimeout &&
                                 current->lastSeen < timedOut)) {
             if(semaphoreDeleted) {
                 UA_LOG_INFO(&server->config.logger, UA_LOGCATEGORY_SERVER,
@@ -554,14 +548,8 @@ void UA_Discovery_cleanupTimedOut(UA_Server *server, UA_DateTime nowMonotonic) {
             }
             LIST_REMOVE(current, pointers);
             UA_RegisteredServer_clear(&current->registeredServer);
-#if UA_MULTITHREADING >= 200
-            UA_atomic_subSize(&server->discoveryManager.registeredServersSize, 1);
-            current->delayedCleanup.callback = NULL; /* Only free the structure */
-            UA_WorkQueue_enqueueDelayed(&server->workQueue, &current->delayedCleanup);
-#else
             UA_free(current);
             server->discoveryManager.registeredServersSize--;
-#endif
         }
     }
 }
@@ -582,7 +570,7 @@ periodicServerRegister(UA_Server *server, void *data) {
 
     struct PeriodicServerRegisterCallback *cb = (struct PeriodicServerRegisterCallback *)data;
 
-    UA_StatusCode retval = UA_Client_connect_noSession(cb->client, cb->discovery_server_url);
+    UA_StatusCode retval = UA_Client_connectSecureChannel(cb->client, cb->discovery_server_url);
     if (retval == UA_STATUSCODE_GOOD) {
         /* Register
            You can also use a semaphore file. That file must exist. When the file is
@@ -593,13 +581,15 @@ periodicServerRegister(UA_Server *server, void *data) {
            "opc.tcp://localhost:4840", "/path/to/some/file");
         */
         retval = register_server_with_discovery_server(server, cb->client, false, NULL);
-    }
-    if (cb->client->state == UA_CLIENTSTATE_CONNECTED) {
-        UA_StatusCode retval1 = UA_Client_disconnect(cb->client);
-        if(retval1 != UA_STATUSCODE_GOOD) {
-            UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
-                         "Could not disconnect client from register server. StatusCode %s",
-                         UA_StatusCode_name(retval));
+        if (retval == UA_STATUSCODE_BADCONNECTIONCLOSED) {
+            /* If the periodic interval is higher than the maximum lifetime of
+             * the session, the server will close the connection. In this case
+             * we should try to reconnect */
+            UA_Client_disconnect(cb->client);
+            retval = UA_Client_connectSecureChannel(cb->client, cb->discovery_server_url);
+            if (retval == UA_STATUSCODE_GOOD) {
+                retval = register_server_with_discovery_server(server, cb->client, false, NULL);
+            }
         }
     }
     /* Registering failed */
@@ -656,32 +646,31 @@ UA_Server_addPeriodicServerRegisterCallback(UA_Server *server,
     }
 
 
-    if (client->connection.state != UA_CONNECTION_CLOSED) {
+    if (client->connection.state != UA_CONNECTIONSTATE_CLOSED) {
         UA_UNLOCK(server->serviceMutex);
         return UA_STATUSCODE_BADINVALIDSTATE;
     }
 
-    /* check if we are already registering with the given discovery url and remove the old periodic call */
-    {
-        periodicServerRegisterCallback_entry *rs, *rs_tmp;
-        LIST_FOREACH_SAFE(rs, &server->discoveryManager.
-                          periodicServerRegisterCallbacks, pointers, rs_tmp) {
-            if(strcmp(rs->callback->discovery_server_url, discoveryServerUrl) == 0) {
-                UA_LOG_INFO(&server->config.logger, UA_LOGCATEGORY_SERVER,
-                            "There is already a register callback for '%s' in place. Removing the older one.", discoveryServerUrl);
-                removeCallback(server, rs->callback->id);
-                LIST_REMOVE(rs, pointers);
-                UA_free(rs->callback->discovery_server_url);
-                UA_free(rs->callback);
-                UA_free(rs);
-                break;
-            }
+    /* Check if we are already registering with the given discovery url and
+     * remove the old periodic call */
+    periodicServerRegisterCallback_entry *rs, *rs_tmp;
+    LIST_FOREACH_SAFE(rs, &server->discoveryManager.
+                      periodicServerRegisterCallbacks, pointers, rs_tmp) {
+        if(strcmp(rs->callback->discovery_server_url, discoveryServerUrl) == 0) {
+            UA_LOG_INFO(&server->config.logger, UA_LOGCATEGORY_SERVER,
+                        "There is already a register callback for '%s' in place. "
+                        "Removing the older one.", discoveryServerUrl);
+            removeCallback(server, rs->callback->id);
+            LIST_REMOVE(rs, pointers);
+            UA_free(rs->callback->discovery_server_url);
+            UA_free(rs->callback);
+            UA_free(rs);
+            break;
         }
     }
 
     /* Allocate and initialize */
-    struct PeriodicServerRegisterCallback* cb =
-        (struct PeriodicServerRegisterCallback*)
+    struct PeriodicServerRegisterCallback* cb = (struct PeriodicServerRegisterCallback*)
         UA_malloc(sizeof(struct PeriodicServerRegisterCallback));
     if(!cb) {
         UA_UNLOCK(server->serviceMutex);
@@ -719,8 +708,8 @@ UA_Server_addPeriodicServerRegisterCallback(UA_Server *server,
 
 #ifndef __clang_analyzer__
     // the analyzer reports on LIST_INSERT_HEAD a use after free false positive
-    periodicServerRegisterCallback_entry *newEntry =
-            (periodicServerRegisterCallback_entry *)UA_malloc(sizeof(periodicServerRegisterCallback_entry));
+    periodicServerRegisterCallback_entry *newEntry = (periodicServerRegisterCallback_entry*)
+        UA_malloc(sizeof(periodicServerRegisterCallback_entry));
     if(!newEntry) {
         removeCallback(server, cb->id);
         UA_free(cb);

@@ -4,6 +4,7 @@
  *
  *    Copyright 2017 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
+ *    Copyright 2017 (c) HMS Industrial Networks AB (Author: Jonas Green)
  */
 
 #include <open62541/client.h>
@@ -70,7 +71,7 @@ register_server_with_discovery_server(UA_Server *server,
     // Set to NODELETE so that we can just use a pointer to the mdns config
     request.discoveryConfiguration[0].encoding = UA_EXTENSIONOBJECT_DECODED_NODELETE;
     request.discoveryConfiguration[0].content.decoded.type = &UA_TYPES[UA_TYPES_MDNSDISCOVERYCONFIGURATION];
-    request.discoveryConfiguration[0].content.decoded.data = &server->config.discovery.mdns;
+    request.discoveryConfiguration[0].content.decoded.data = &server->config.mdnsConfig;
 #endif
 
     // First try with RegisterServer2, if that isn't implemented, use RegisterServer

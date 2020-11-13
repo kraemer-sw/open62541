@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-
 # Sonar code quality
 if ! [ -z ${SONAR+x} ]; then
     if ([ "${TRAVIS_REPO_SLUG}" != "open62541/open62541" ] ||
@@ -18,7 +17,7 @@ if ! [ -z ${SONAR+x} ]; then
 	    -DUA_BUILD_EXAMPLES=ON \
         -DUA_ENABLE_DISCOVERY=ON \
         -DUA_ENABLE_DISCOVERY_MULTICAST=ON \
-        -DUA_ENABLE_ENCRYPTION .. \
+        -DUA_ENABLE_ENCRYPTION=ON .. \
     && make -j
 	cd ..
 	sonar-scanner
@@ -472,6 +471,29 @@ if [ "$CC" != "tcc" ]; then
     cd .. && rm build -rf
     echo -en 'travis_fold:end:script.build.unit_test_ns0_minimal\\r'
 
+    echo -e "\r\n== Unit tests (reduced NS0 with openssl) ==" && echo -en 'travis_fold:start:script.build.unit_test_ns0_reduced_openssl\\r'
+    mkdir -p build && cd build
+    cmake \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DPYTHON_EXECUTABLE:FILEPATH=/usr/bin/$PYTHON \
+        -DUA_BUILD_EXAMPLES=ON \
+        -DUA_BUILD_UNIT_TESTS=ON \
+        -DUA_ENABLE_COVERAGE=ON \
+        -DUA_ENABLE_DA=ON \
+        -DUA_ENABLE_DISCOVERY=ON \
+        -DUA_ENABLE_DISCOVERY_MULTICAST=ON \
+        -DUA_ENABLE_ENCRYPTION_OPENSSL=ON \
+        -DUA_ENABLE_JSON_ENCODING=ON \
+        -DUA_ENABLE_PUBSUB=ON \
+        -DUA_ENABLE_PUBSUB_DELTAFRAMES=ON \
+        -DUA_ENABLE_PUBSUB_INFORMATIONMODEL=ON \
+        -DUA_ENABLE_UNIT_TESTS_MEMCHECK=ON \
+        -DUA_NAMESPACE_ZERO=REDUCED ..
+    make -j && make test
+    if [ $? -ne 0 ] ; then exit 1 ; fi
+    cd .. && rm build -rf    
+    echo -en 'travis_fold:end:script.build.unit_test_ns0_reduced_openssl\\r'
+
     echo -e "\r\n== Unit tests (reduced NS0) ==" && echo -en 'travis_fold:start:script.build.unit_test_ns0_reduced\\r'
     mkdir -p build && cd build
     cmake \
@@ -518,7 +540,7 @@ if [ "$CC" != "tcc" ]; then
         		echo -en "== Commit is tag build for '${TRAVIS_TAG}'. Detected branch for tag = '$BRANCH_FOR_TAG' \n"
 			fi
 
-			if [ "${REAL_BRANCH}" = "master" ] || [ "${REAL_BRANCH}" = "1.0" ]; then
+			if [ "${REAL_BRANCH}" = "master" ] || [ "${REAL_BRANCH}" = "1.0" ] || [ "${REAL_BRANCH}" = "1.1" ]; then
 				# Create a separate branch with the `pack/` prefix. This branch has the correct debian/changelog set, and
 				# The submodules are directly copied
 				echo -e "\r\n== Pushing 'pack/${REAL_BRANCH}' branch =="  && echo -en 'travis_fold:start:script.build.pack-branch\\r'

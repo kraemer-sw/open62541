@@ -58,14 +58,15 @@ connectMqtt(UA_PubSubChannelDataMQTT* channelData){
     conf.remoteMaxChunkCount = 1;
 
     /* Create TCP connection: open the blocking TCP socket (connecting to the broker) */
-    UA_Connection connection = UA_ClientConnectionTCP( conf, address.url, 1000, NULL);
-    if(connection.state != UA_CONNECTION_ESTABLISHED && connection.state != UA_CONNECTION_OPENING){
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK, "PubSub MQTT: Connection creation failed. Tcp connection failed!");
+    UA_Connection connection = UA_ClientConnectionTCP_init(conf, address.url,
+                                                           1000, UA_Log_Stdout);
+    UA_ClientConnectionTCP_poll(&connection, 1000, UA_Log_Stdout);
+    if(connection.state != UA_CONNECTIONSTATE_ESTABLISHED &&
+       connection.state != UA_CONNECTIONSTATE_OPENING){
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK,
+                     "PubSub MQTT: Connection creation failed. Tcp connection failed!");
         return UA_STATUSCODE_BADCOMMUNICATIONERROR;
     }
-
-    /* Set socket to nonblocking!*/
-    UA_socket_set_nonblocking(connection.sockfd);
 
     /* save connection */
     channelData->connection = (UA_Connection*)UA_calloc(1, sizeof(UA_Connection));
@@ -128,9 +129,40 @@ connectMqtt(UA_PubSubChannelDataMQTT* channelData){
     }
     memcpy(clientId, channelData->mqttClientId->data, channelData->mqttClientId->length);
 
+    char *username = NULL;
+    if (channelData->mqttUsername.length > 0) {
+        /* Convert username UA_String to char* null terminated */
+        username = (char*)calloc(1,channelData->mqttUsername.length + 1);
+        if(!username){
+            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "PubSub MQTT: Connection creation failed. Out of memory.");
+            UA_free(channelData->connection);
+            UA_free(client);
+            UA_free(clientId);
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        }
+        memcpy(username, channelData->mqttUsername.data, channelData->mqttUsername.length);
+    }
+
+    char *password = NULL;
+    if (channelData->mqttPassword.length > 0) {
+        /* Convert password UA_String to char* null terminated */
+        password = (char*)calloc(1,channelData->mqttPassword.length + 1);
+        if(!password){
+            UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "PubSub MQTT: Connection creation failed. Out of memory.");
+            UA_free(channelData->connection);
+            UA_free(client);
+            UA_free(clientId);
+            UA_free(username);
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        }
+        memcpy(password, channelData->mqttPassword.data, channelData->mqttPassword.length);
+    }
+
     /* Connect mqtt with socket fd of networktcp  */
-    mqttErr = mqtt_connect(client, clientId, NULL, NULL, 0, NULL, NULL, 0, 400);
+    mqttErr = mqtt_connect(client, clientId, NULL, NULL, 0, username, password, 0, 400);
     UA_free(clientId);
+    UA_free(username);
+    UA_free(password);
     if(mqttErr != MQTT_OK){
         UA_free(channelData->connection);
         UA_free(client);
@@ -246,12 +278,14 @@ yieldMqtt(UA_PubSubChannelDataMQTT* channelData, UA_UInt16 timeout){
     }
 
     UA_Connection *connection = channelData->connection;
-    if(connection == NULL){
+    if(!connection) {
         return UA_STATUSCODE_BADCOMMUNICATIONERROR;
     }
     
-    if(connection->state != UA_CONNECTION_ESTABLISHED && connection->state != UA_CONNECTION_OPENING){
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK, "PubSub MQTT: yield: Tcp Connection not established!");
+    if(connection->state != UA_CONNECTIONSTATE_ESTABLISHED &&
+       connection->state != UA_CONNECTIONSTATE_OPENING) {
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_NETWORK,
+                     "PubSub MQTT: yield: Tcp Connection not established!");
         return UA_STATUSCODE_BADCOMMUNICATIONERROR;
     }
     

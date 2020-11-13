@@ -24,8 +24,10 @@
 */
 extern "C" int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    if(size <= 4)
+        return 0;
 
-    if (!UA_memoryManager_setLimitFromLast4Bytes(data, size))
+    if(!UA_memoryManager_setLimitFromLast4Bytes(data, size))
         return 0;
     size -= 4;
 
@@ -58,7 +60,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     UA_Server_processBinaryMessage(server, &c, &msg);
     // if we got an invalid chunk, the message is not deleted, so delete it here
-    UA_ByteString_deleteMembers(&msg);
+    UA_ByteString_clear(&msg);
     UA_Server_run_shutdown(server);
     UA_Server_delete(server);
     c.close(&c);

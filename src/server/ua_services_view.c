@@ -20,12 +20,135 @@
 #include "ua_services.h"
 #include "ziptree.h"
 
-/********************/
-/* Browse Recursive */
-/********************/
+#define UA_MAX_TREE_RECURSE 50 /* How deep up/down the tree do we recurse at most? */
 
-/* A RefTree holds a single array for both the NodeIds encountered during
- * recursive browsing and the entries for a tree-structure to check for
+UA_StatusCode
+referenceTypeIndices(UA_Server *server, const UA_NodeId *refType,
+                     UA_ReferenceTypeSet *indices, UA_Boolean includeSubtypes) {
+    UA_ReferenceTypeSet_init(indices);
+
+    const UA_Node *refNode = UA_NODESTORE_GET(server, refType);
+    if(!refNode)
+        return UA_STATUSCODE_BADREFERENCETYPEIDINVALID;
+
+    if(refNode->head.nodeClass != UA_NODECLASS_REFERENCETYPE) {
+        UA_NODESTORE_RELEASE(server, refNode);
+        return UA_STATUSCODE_BADREFERENCETYPEIDINVALID;
+    }
+
+    if(!includeSubtypes)
+        *indices = UA_REFTYPESET(refNode->referenceTypeNode.referenceTypeIndex);
+    else
+        *indices = refNode->referenceTypeNode.subTypes;
+
+    UA_NODESTORE_RELEASE(server, refNode);
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_Boolean
+matchClassMask(const UA_Node *node, UA_UInt32 nodeClassMask) {
+    if(nodeClassMask != UA_NODECLASS_UNSPECIFIED &&
+       (node->head.nodeClass & nodeClassMask) == 0)
+        return false;
+    return true;
+}
+
+/****************/
+/* IsNodeInTree */
+/****************/
+
+/* Internal method to check if a node is already upwards from a leaf node */
+
+/* Keeps track of visited nodes to detect circular references */
+struct ref_history {
+    struct ref_history *parent; /* the previous element */
+    const UA_NodeId *id; /* the id of the node at this depth */
+    UA_UInt16 depth;
+};
+
+static UA_Boolean
+isNodeInTreeNoCircular(UA_Server *server, const UA_NodeId *leafNode,
+                       const UA_NodeId *nodeToFind, struct ref_history *visitedRefs,
+                       const UA_ReferenceTypeSet *relevantRefs) {
+    if(UA_NodeId_equal(nodeToFind, leafNode))
+        return true;
+
+    if(visitedRefs->depth >= UA_MAX_TREE_RECURSE)
+        return false;
+
+    const UA_Node *node = UA_NODESTORE_GET(server, leafNode);
+    if(!node)
+        return false;
+
+    for(size_t i = 0; i < node->head.referencesSize; ++i) {
+        UA_NodeReferenceKind *refs = &node->head.references[i];
+        /* Search upwards in the tree */
+        if(!refs->isInverse)
+            continue;
+
+        /* Consider only the indicated reference types */
+        if(!UA_ReferenceTypeSet_contains(relevantRefs, refs->referenceTypeIndex))
+            continue;
+
+        /* Match the targets or recurse */
+        UA_ReferenceTarget *target;
+        TAILQ_FOREACH(target, &refs->queueHead, queuePointers) {
+            /* Check if we already have seen the referenced node and skip to
+             * avoid endless recursion. Do this only at every 5th depth to save
+             * effort. Circular dependencies are rare and forbidden for most
+             * reference types. */
+            if(visitedRefs->depth % 5 == 4) {
+                struct ref_history *last = visitedRefs;
+                UA_Boolean skip = false;
+                while(!skip && last) {
+                    if(UA_NodeId_equal(last->id, &target->targetId.nodeId))
+                        skip = true;
+                    last = last->parent;
+                }
+                if(skip)
+                    continue;
+            }
+
+            /* Stack-allocate the visitedRefs structure for the next depth */
+            struct ref_history nextVisitedRefs = {visitedRefs, &target->targetId.nodeId,
+                                                  (UA_UInt16)(visitedRefs->depth+1)};
+
+            /* Recurse */
+            UA_Boolean foundRecursive =
+                isNodeInTreeNoCircular(server, &target->targetId.nodeId, nodeToFind,
+                                       &nextVisitedRefs, relevantRefs);
+            if(foundRecursive) {
+                UA_NODESTORE_RELEASE(server, node);
+                return true;
+            }
+        }
+    }
+
+    UA_NODESTORE_RELEASE(server, node);
+    return false;
+}
+
+UA_Boolean
+isNodeInTree(UA_Server *server, const UA_NodeId *leafNode,
+             const UA_NodeId *nodeToFind, const UA_ReferenceTypeSet *relevantRefs) {
+    struct ref_history visitedRefs = {NULL, leafNode, 0};
+    return isNodeInTreeNoCircular(server, leafNode, nodeToFind, &visitedRefs, relevantRefs);
+}
+
+UA_Boolean
+isNodeInTree_singleRef(UA_Server *server, const UA_NodeId *leafNode,
+                       const UA_NodeId *nodeToFind, const UA_Byte relevantRefTypeIndex) {
+    UA_ReferenceTypeSet reftypes = UA_REFTYPESET(relevantRefTypeIndex);
+    return isNodeInTree(server, leafNode, nodeToFind, &reftypes);
+}
+
+/***********/
+/* RefTree */
+/***********/
+
+/* A RefTree is a sorted tree that ensures we consider each node just once
+ * during a Browse. It holds a single array for both the NodeIds encountered
+ * during recursive browsing and the entries for a tree-structure to check for
  * duplicates. Once the (recursive) browse has finished, the tree-structure part
  * can be simply cut away. A single realloc operation (with some pointer
  * repairing) can be used to increase the capacity of the RefTree.
@@ -59,7 +182,7 @@ cmpTarget(const void *a, const void *b) {
 
 ZIP_HEAD(RefHead, RefEntry);
 typedef struct RefHead RefHead;
-ZIP_PROTTYPE(RefHead, RefEntry, RefEntry)
+ZIP_PROTOTYPE(RefHead, RefEntry, RefEntry)
 ZIP_IMPL(RefHead, RefEntry, zipfields, RefEntry, zipfields, cmpTarget)
 
 typedef struct {
@@ -71,13 +194,14 @@ typedef struct {
 
 static UA_StatusCode UA_FUNC_ATTR_WARN_UNUSED_RESULT
 RefTree_init(RefTree *rt) {
+    rt->size = 0;
+    rt->capacity = 0;
+    ZIP_INIT(&rt->head);
     size_t space = (sizeof(UA_ExpandedNodeId) + sizeof(RefEntry)) * UA_BROWSE_INITIAL_SIZE;
     rt->targets = (UA_ExpandedNodeId*)UA_malloc(space);
     if(!rt->targets)
         return UA_STATUSCODE_BADOUTOFMEMORY;
     rt->capacity = UA_BROWSE_INITIAL_SIZE;
-    rt->size = 0;
-    ZIP_INIT(&rt->head);
     return UA_STATUSCODE_GOOD;
 }
 
@@ -85,7 +209,8 @@ static void
 RefTree_clear(RefTree *rt) {
     for(size_t i = 0; i < rt->size; i++)
         UA_ExpandedNodeId_clear(&rt->targets[i]);
-    UA_free(rt->targets);
+    if(rt->targets)
+        UA_free(rt->targets);
 }
 
 /* Double the capacity of the reftree */
@@ -108,11 +233,13 @@ RefTree_double(RefTree *rt) {
         ((uintptr_t)newTargets + (rt->capacity * sizeof(UA_ExpandedNodeId)));
     memmove(reArray, oldReArray, rt->size * sizeof(RefEntry));
     for(size_t i = 0; i < rt->size; i++) {
-        if(reArray[i].zipfields.zip_left)
-            *(uintptr_t*)&reArray[i].zipfields.zip_left += entrydiff;
-        if(reArray[i].zipfields.zip_right)
-            *(uintptr_t*)&reArray[i].zipfields.zip_right += entrydiff;
-        *(uintptr_t*)&reArray[i].target += arraydiff;
+        uintptr_t *left = (uintptr_t*)&ZIP_LEFT(&reArray[i], zipfields);
+        uintptr_t *right = (uintptr_t*)&ZIP_RIGHT(&reArray[i], zipfields);
+        if(*left != 0)
+            *left += entrydiff;
+        if(*right != 0)
+            *right += entrydiff;
+        reArray[i].target = (UA_ExpandedNodeId*)((uintptr_t)reArray[i].target + arraydiff);
     }
 
     rt->head.zip_root = (RefEntry*)((uintptr_t)rt->head.zip_root + entrydiff);
@@ -122,13 +249,16 @@ RefTree_double(RefTree *rt) {
 }
 
 static UA_StatusCode UA_FUNC_ATTR_WARN_UNUSED_RESULT
-RefTree_add(RefTree *rt, const UA_ExpandedNodeId *target) {
+RefTree_add(RefTree *rt, const UA_ExpandedNodeId *target, UA_Boolean *duplicate) {
     /* Is the target already in the tree? */
     RefEntry dummy;
     dummy.target = target;
     dummy.targetHash = UA_ExpandedNodeId_hash(target);
-    if(ZIP_FIND(RefHead, &rt->head, &dummy))
+    if(ZIP_FIND(RefHead, &rt->head, &dummy)) {
+        if(duplicate)
+            *duplicate = true;
         return UA_STATUSCODE_GOOD;
+    }
 
     UA_StatusCode s = UA_STATUSCODE_GOOD;
     if(rt->capacity <= rt->size) {
@@ -149,29 +279,39 @@ RefTree_add(RefTree *rt, const UA_ExpandedNodeId *target) {
     return UA_STATUSCODE_GOOD;
 }
 
-static UA_Boolean
-relevantReference(const UA_NodeId *refType, size_t relevantRefsSize,
-                  const UA_NodeId *relevantRefs) {
-    if(!relevantRefs)
-        return true;
-    for(size_t i = 0; i < relevantRefsSize; i++) {
-        if(UA_NodeId_equal(refType, &relevantRefs[i]))
-            return true;
-    }
-    return false;
-}
+/********************/
+/* Browse Recursive */
+/********************/
 
 static UA_StatusCode
-addRelevantReferences(UA_Server *server, RefTree *rt, const UA_NodeId *nodeId,
-                      size_t refTypesSize, const UA_NodeId *refTypes,
-                      UA_BrowseDirection browseDirection) {
+browseRecursiveInner(UA_Server *server, RefTree *rt, UA_UInt16 depth, UA_Boolean skip,
+                     const UA_NodeId *nodeId, UA_BrowseDirection browseDirection,
+                     const UA_ReferenceTypeSet *refTypes, UA_UInt32 nodeClassMask) {
+    /* Have we reached the max recursion depth? */
+    if(depth >= UA_MAX_TREE_RECURSE)
+        return UA_STATUSCODE_GOOD;
+
     const UA_Node *node = UA_NODESTORE_GET(server, nodeId);
     if(!node)
         return UA_STATUSCODE_BADNODEIDUNKNOWN;
 
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    for(size_t i = 0; i < node->referencesSize; i++) {
-        UA_NodeReferenceKind *rk = &node->references[i];
+    const UA_NodeHead *head = &node->head;
+
+    /* Add the current node to the results if we don't want to skip it (i.e. for
+     * includeStartNodes) and it matches the nodeClassMask filter. Process the
+     * children also if the nodeClassMask does not match. */
+    if(!skip && matchClassMask(node, nodeClassMask)) {
+        UA_Boolean duplicate = false;
+        UA_ExpandedNodeId temp = UA_EXPANDEDNODEID_NULL;
+        temp.nodeId = head->nodeId;
+        retval = RefTree_add(rt, &temp, &duplicate);
+        if(duplicate || retval != UA_STATUSCODE_GOOD)
+            goto cleanup;
+    }
+
+    for(size_t i = 0; i < head->referencesSize; i++) {
+        UA_NodeReferenceKind *rk = &head->references[i];
 
         /* Reference in the right direction? */
         if(rk->isInverse && browseDirection == UA_BROWSEDIRECTION_FORWARD)
@@ -180,11 +320,17 @@ addRelevantReferences(UA_Server *server, RefTree *rt, const UA_NodeId *nodeId,
             continue;
 
         /* Is the reference part of the hierarchy of references we look for? */
-        if(!relevantReference(&rk->referenceTypeId, refTypesSize, refTypes))
+        if(!UA_ReferenceTypeSet_contains(refTypes, rk->referenceTypeIndex))
             continue;
 
-        for(size_t k = 0; k < rk->refTargetsSize; k++) {
-            retval = RefTree_add(rt, &rk->refTargets[k].target);
+        UA_ReferenceTarget *target;
+        TAILQ_FOREACH(target, &rk->queueHead, queuePointers) {
+            if(UA_ExpandedNodeId_isLocal(&target->targetId))
+                retval = browseRecursiveInner(server, rt, (UA_UInt16)(depth+1), false,
+                                              &target->targetId.nodeId, browseDirection,
+                                              refTypes, nodeClassMask);
+            else
+                retval = RefTree_add(rt, &target->targetId, NULL);
             if(retval != UA_STATUSCODE_GOOD)
                 goto cleanup;
         }
@@ -196,131 +342,53 @@ addRelevantReferences(UA_Server *server, RefTree *rt, const UA_NodeId *nodeId,
 }
 
 UA_StatusCode
-browseRecursive(UA_Server *server,
-                size_t startNodesSize, const UA_NodeId *startNodes,
-                size_t refTypesSize, const UA_NodeId *refTypes,
-                UA_BrowseDirection browseDirection, UA_Boolean includeStartNodes,
+browseRecursive(UA_Server *server, size_t startNodesSize, const UA_NodeId *startNodes,
+                UA_BrowseDirection browseDirection, const UA_ReferenceTypeSet *refTypes,
+                UA_UInt32 nodeClassMask, UA_Boolean includeStartNodes,
                 size_t *resultsSize, UA_ExpandedNodeId **results) {
     RefTree rt;
     UA_StatusCode retval = RefTree_init(&rt);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
-    /* Add the start nodes? */
-    UA_ExpandedNodeId en = UA_EXPANDEDNODEID_NULL;
-    for(size_t i = 0; i < startNodesSize && retval == UA_STATUSCODE_GOOD; i++) {
-        if(includeStartNodes) {
-            en.nodeId = startNodes[i];
-            retval = RefTree_add(&rt, &en);
-        } else {
-            retval = addRelevantReferences(server, &rt, &startNodes[i],
-                                           refTypesSize, refTypes, browseDirection);
-        }
-    }
-    if(retval != UA_STATUSCODE_GOOD) {
-        RefTree_clear(&rt);
-        return retval;
+    for(size_t i = 0; i < startNodesSize; i++) {
+        retval = browseRecursiveInner(server, &rt, 0, !includeStartNodes,
+                                      &startNodes[i], browseDirection,
+                                      refTypes, nodeClassMask);
+        if(retval != UA_STATUSCODE_GOOD)
+            break;
     }
 
-    /* Loop over the targets we have so far. This recurses, as new targets are
-     * added to rt. */
-    for(size_t i = 0; i < rt.size; i++) {
-        /* Dont recurse into remote nodes */
-        if(rt.targets[i].serverIndex > 0)
-            continue;
-        if(rt.targets[i].namespaceUri.data != NULL)
-            continue;
-
-        retval = addRelevantReferences(server, &rt, &rt.targets[i].nodeId,
-                                       refTypesSize, refTypes, browseDirection);
-        if(retval != UA_STATUSCODE_GOOD) {
-            RefTree_clear(&rt);
-            return retval;
-        }
-    }
-
-    if(rt.size > 0) {
+    if(rt.size > 0 && retval == UA_STATUSCODE_GOOD) {
         *results = rt.targets;
         *resultsSize = rt.size;
     } else {
         RefTree_clear(&rt);
     }
-
-    return UA_STATUSCODE_GOOD;
-}
-
-/* Only if IncludeSubtypes is selected */
-UA_StatusCode
-referenceSubtypes(UA_Server *server, const UA_NodeId *refType,
-                  size_t *refTypesSize, UA_NodeId **refTypes) {
-    /* Leave refTypes == NULL */
-    if(UA_NodeId_isNull(refType))
-        return UA_STATUSCODE_GOOD;
-
-    /* Browse recursive for the hierarchy of sub-references */
-    UA_ExpandedNodeId *rt = NULL;
-    size_t rtSize = 0;
-    UA_NodeId hasSubtype = UA_NODEID_NUMERIC(0, UA_NS0ID_HASSUBTYPE);
-    UA_StatusCode retval = browseRecursive(server, 1, refType, 1, &hasSubtype,
-                                           UA_BROWSEDIRECTION_FORWARD, true, &rtSize, &rt);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    UA_assert(rtSize > 0);
-
-    /* Allocate space (realloc if non-NULL) */
-    UA_NodeId *newRt = NULL;
-    if(!*refTypes) {
-        newRt = (UA_NodeId*)UA_malloc(rtSize * UA_TYPES[UA_TYPES_NODEID].memSize);
-    } else {
-        newRt = (UA_NodeId*)UA_realloc(*refTypes, (*refTypesSize + rtSize) *
-                                           UA_TYPES[UA_TYPES_NODEID].memSize);
-    }
-    if(!newRt) {
-        UA_Array_delete(rt, rtSize, &UA_TYPES[UA_TYPES_EXPANDEDNODEID]);
-        return UA_STATUSCODE_BADOUTOFMEMORY;
-    }
-    *refTypes = newRt;
-
-    /* Move NodeIds */
-    for(size_t i = 0; i < rtSize; i++) {
-        (*refTypes)[*refTypesSize + i] = rt[i].nodeId;
-        UA_NodeId_init(&rt[i].nodeId);
-    }
-    *refTypesSize += rtSize;
-    UA_Array_delete(rt, rtSize, &UA_TYPES[UA_TYPES_EXPANDEDNODEID]);
-    return UA_STATUSCODE_GOOD;
+    return retval;
 }
 
 UA_StatusCode
 UA_Server_browseRecursive(UA_Server *server, const UA_BrowseDescription *bd,
                           size_t *resultsSize, UA_ExpandedNodeId **results) {
-    /* Set the list of relevant reference types */
     UA_LOCK(server->serviceMutex);
-    UA_NodeId *refTypes = NULL;
-    size_t refTypesSize = 0;
+
+    /* Set the list of relevant reference types */
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
+    UA_ReferenceTypeSet refTypes;
+    UA_ReferenceTypeSet_any(&refTypes);
     if(!UA_NodeId_isNull(&bd->referenceTypeId)) {
-        if(!bd->includeSubtypes) {
-            refTypes = (UA_NodeId*)(uintptr_t)&bd->referenceTypeId;
-            refTypesSize = 1;
-        } else {
-            retval = referenceSubtypes(server, &bd->referenceTypeId,
-                                       &refTypesSize, &refTypes);
-            if(retval != UA_STATUSCODE_GOOD) {
-                UA_UNLOCK(server->serviceMutex);
-                return retval;
-            }
+        retval = referenceTypeIndices(server, &bd->referenceTypeId,
+                                      &refTypes, bd->includeSubtypes);
+        if(retval != UA_STATUSCODE_GOOD) {
+            UA_UNLOCK(server->serviceMutex);
+            return retval;
         }
     }
 
     /* Browse */
-    retval = browseRecursive(server, 1, &bd->nodeId, refTypesSize, refTypes,
-                             bd->browseDirection, false, resultsSize, results);
-
-    /* Clean up */
-    if(refTypes && bd->includeSubtypes)
-        UA_Array_delete(refTypes, refTypesSize, &UA_TYPES[UA_TYPES_NODEID]);
+    retval = browseRecursive(server, 1, &bd->nodeId, bd->browseDirection,
+                             &refTypes, bd->nodeClassMask, false, resultsSize, results);
 
     UA_UNLOCK(server->serviceMutex);
     return retval;
@@ -375,8 +443,7 @@ struct ContinuationPoint {
     UA_BrowseDescription browseDescription;
     UA_UInt32 maxReferences;
 
-    size_t relevantReferencesSize;
-    UA_NodeId *relevantReferences;
+    UA_ReferenceTypeSet relevantReferences;
 
     /* The last point in the node references? */
     size_t referenceKindIndex;
@@ -387,8 +454,6 @@ ContinuationPoint *
 ContinuationPoint_clear(ContinuationPoint *cp) {
     UA_ByteString_clear(&cp->identifier);
     UA_BrowseDescription_clear(&cp->browseDescription);
-    UA_Array_delete(cp->relevantReferences, cp->relevantReferencesSize,
-                    &UA_TYPES[UA_TYPES_NODEID]);
     return cp->next;
 }
 
@@ -409,7 +474,8 @@ addReferenceDescription(UA_Server *server, RefResult *rr, const UA_NodeReference
     /* Fields without access to the actual node */
     retval = UA_ExpandedNodeId_copy(nodeId, &descr->nodeId);
     if(mask & UA_BROWSERESULTMASK_REFERENCETYPEID)
-        retval |= UA_NodeId_copy(&ref->referenceTypeId, &descr->referenceTypeId);
+        retval |= UA_NodeId_copy(UA_NODESTORE_GETREFERENCETYPEID(server, ref->referenceTypeIndex),
+                                 &descr->referenceTypeId);
     if(mask & UA_BROWSERESULTMASK_ISFORWARD)
         descr->isForward = !ref->isInverse;
 
@@ -421,17 +487,17 @@ addReferenceDescription(UA_Server *server, RefResult *rr, const UA_NodeReference
     
     /* Fields that require the actual node */
     if(mask & UA_BROWSERESULTMASK_NODECLASS)
-        retval |= UA_NodeClass_copy(&curr->nodeClass, &descr->nodeClass);
+        descr->nodeClass = curr->head.nodeClass;
     if(mask & UA_BROWSERESULTMASK_BROWSENAME)
-        retval |= UA_QualifiedName_copy(&curr->browseName, &descr->browseName);
+        retval |= UA_QualifiedName_copy(&curr->head.browseName, &descr->browseName);
     if(mask & UA_BROWSERESULTMASK_DISPLAYNAME)
-        retval |= UA_LocalizedText_copy(&curr->displayName, &descr->displayName);
+        retval |= UA_LocalizedText_copy(&curr->head.displayName, &descr->displayName);
     if(mask & UA_BROWSERESULTMASK_TYPEDEFINITION) {
-        if(curr->nodeClass == UA_NODECLASS_OBJECT ||
-           curr->nodeClass == UA_NODECLASS_VARIABLE) {
-            const UA_Node *type = getNodeType(server, curr);
+        if(curr->head.nodeClass == UA_NODECLASS_OBJECT ||
+           curr->head.nodeClass == UA_NODECLASS_VARIABLE) {
+            const UA_Node *type = getNodeType(server, &curr->head);
             if(type) {
-                retval |= UA_NodeId_copy(&type->nodeId, &descr->typeDefinition.nodeId);
+                retval |= UA_NodeId_copy(&type->head.nodeId, &descr->typeDefinition.nodeId);
                 UA_NODESTORE_RELEASE(server, type);
             }
         }
@@ -444,17 +510,9 @@ addReferenceDescription(UA_Server *server, RefResult *rr, const UA_NodeReference
     return retval;
 }
 
-static UA_Boolean
-matchClassMask(const UA_Node *node, UA_UInt32 nodeClassMask) {
-    if(nodeClassMask != UA_NODECLASS_UNSPECIFIED &&
-       (node->nodeClass & nodeClassMask) == 0)
-        return false;
-    return true;
-}
-
 /* Returns whether the node / continuationpoint is done */
 static UA_StatusCode
-browseReferences(UA_Server *server, const UA_Node *node,
+browseReferences(UA_Server *server, const UA_NodeHead *head,
                  ContinuationPoint *cp, RefResult *rr, UA_Boolean *done) {
     UA_assert(cp != NULL);
     const UA_BrowseDescription *bd= &cp->browseDescription;
@@ -465,8 +523,8 @@ browseReferences(UA_Server *server, const UA_Node *node,
     /* Loop over the node's references */
     const UA_Node *target = NULL;
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    for(; referenceKindIndex < node->referencesSize; ++referenceKindIndex) {
-        UA_NodeReferenceKind *rk = &node->references[referenceKindIndex];
+    for(; referenceKindIndex < head->referencesSize; ++referenceKindIndex) {
+        UA_NodeReferenceKind *rk = &head->references[referenceKindIndex];
 
         /* Reference in the right direction? */
         if(rk->isInverse && bd->browseDirection == UA_BROWSEDIRECTION_FORWARD)
@@ -475,19 +533,26 @@ browseReferences(UA_Server *server, const UA_Node *node,
             continue;
 
         /* Is the reference part of the hierarchy of references we look for? */
-        if(!relevantReference(&rk->referenceTypeId, cp->relevantReferencesSize,
-                              cp->relevantReferences))
+        if(!UA_ReferenceTypeSet_contains(&cp->relevantReferences, rk->referenceTypeIndex))
             continue;
 
-        /* Loop over the targets */
-        for(; targetIndex < rk->refTargetsSize; ++targetIndex) {
+        /* Loop until we arrive at the saved index */
+        size_t i = 0;
+        UA_ReferenceTarget *targetRef = NULL;
+        TAILQ_FOREACH(targetRef, &rk->queueHead, queuePointers) {
+            if(i == targetIndex)
+                break;
+            i++;
+        }
+
+        /* Loop over the remaining targets */
+        for(; targetRef; ++targetIndex, targetRef = TAILQ_NEXT(targetRef, queuePointers)) {
             target = NULL;
 
             /* Get the node if it is not a remote reference */
-            if(rk->refTargets[targetIndex].target.serverIndex == 0 &&
-               rk->refTargets[targetIndex].target.namespaceUri.data == NULL) {
-                target = UA_NODESTORE_GET(server,
-                                          &rk->refTargets[targetIndex].target.nodeId);
+            if(targetRef->targetId.serverIndex == 0 &&
+               targetRef->targetId.namespaceUri.data == NULL) {
+                target = UA_NODESTORE_GET(server, &targetRef->targetId.nodeId);
 
                 /* Test if the node class matches */
                 if(target && !matchClassMask(target, bd->nodeClassMask)) {
@@ -508,7 +573,7 @@ browseReferences(UA_Server *server, const UA_Node *node,
 
             /* Copy the node description. Target is on top of the stack */
             retval = addReferenceDescription(server, rr, rk, bd->resultMask,
-                                             &rk->refTargets[targetIndex].target, target);
+                                             &targetRef->targetId, target);
             UA_NODESTORE_RELEASE(server, target);
             if(retval != UA_STATUSCODE_GOOD)
                 return retval;
@@ -547,7 +612,7 @@ browseWithContinuation(UA_Server *server, UA_Session *session,
             return true;
         }
 
-        UA_Boolean isRef = (reftype->nodeClass == UA_NODECLASS_REFERENCETYPE);
+        UA_Boolean isRef = (reftype->head.nodeClass == UA_NODECLASS_REFERENCETYPE);
         UA_NODESTORE_RELEASE(server, reftype);
 
         if(!isRef) {
@@ -562,6 +627,15 @@ browseWithContinuation(UA_Server *server, UA_Session *session,
         return true;
     }
 
+    if(session != &server->adminSession &&
+       !server->config.accessControl.allowBrowseNode(server, &server->config.accessControl,
+                                                     &session->sessionId, session->sessionHandle,
+                                                     &descr->nodeId, node->head.context)) {
+        result->statusCode = UA_STATUSCODE_BADUSERACCESSDENIED;
+        UA_NODESTORE_RELEASE(server, node);
+        return true;
+    }
+
     RefResult rr;
     result->statusCode = RefResult_init(&rr);
     if(result->statusCode != UA_STATUSCODE_GOOD) {
@@ -571,7 +645,7 @@ browseWithContinuation(UA_Server *server, UA_Session *session,
 
     /* Browse the references */
     UA_Boolean done = false;
-    result->statusCode = browseReferences(server, node, cp, &rr, &done);
+    result->statusCode = browseReferences(server, &node->head, cp, &rr, &done);
     UA_NODESTORE_RELEASE(server, node);
     if(result->statusCode != UA_STATUSCODE_GOOD) {
         RefResult_clear(&rr);
@@ -616,28 +690,21 @@ Operation_Browse(UA_Server *server, UA_Session *session, const UA_UInt32 *maxref
     }
 
     /* Get the list of relevant reference types */
-    if(!UA_NodeId_isNull(&descr->referenceTypeId)) {
-        if(!descr->includeSubtypes) {
-            cp->relevantReferences = (UA_NodeId*)(uintptr_t)&descr->referenceTypeId;
-            cp->relevantReferencesSize = 1;
-        } else {
-            result->statusCode =
-                referenceSubtypes(server, &descr->referenceTypeId,
-                                  &cp->relevantReferencesSize, &cp->relevantReferences);
-            if(result->statusCode != UA_STATUSCODE_GOOD)
-                return;
-        }
+    if(UA_NodeId_isNull(&descr->referenceTypeId)) {
+        UA_ReferenceTypeSet_any(&cp->relevantReferences);
+    } else {
+        result->statusCode =
+            referenceTypeIndices(server, &descr->referenceTypeId,
+                                 &cp->relevantReferences, descr->includeSubtypes);
+        if(result->statusCode != UA_STATUSCODE_GOOD)
+            return;
     }
 
     UA_Boolean done = browseWithContinuation(server, session, cp, result);
 
     /* Exit early if done or an error occurred */
-    if(done || result->statusCode != UA_STATUSCODE_GOOD) {
-        if(descr->includeSubtypes)
-            UA_Array_delete(cp->relevantReferences, cp->relevantReferencesSize,
-                            &UA_TYPES[UA_TYPES_NODEID]);
+    if(done || result->statusCode != UA_STATUSCODE_GOOD)
         return;
-    }
 
     /* Persist the new continuation point */
 
@@ -661,17 +728,7 @@ Operation_Browse(UA_Server *server, UA_Session *session, const UA_UInt32 *maxref
     cp2->referenceKindIndex = cp->referenceKindIndex;
     cp2->targetIndex = cp->targetIndex;
     cp2->maxReferences = cp->maxReferences;
-
-    if(descr->includeSubtypes) {
-        cp2->relevantReferences = cp->relevantReferences;
-        cp2->relevantReferencesSize = cp->relevantReferencesSize;
-    } else {
-        retval = UA_Array_copy(cp->relevantReferences, cp->relevantReferencesSize,
-                               (void**)&cp2->relevantReferences, &UA_TYPES[UA_TYPES_NODEID]);
-        if(retval != UA_STATUSCODE_GOOD)
-            goto cleanup;
-        cp2->relevantReferencesSize = cp->relevantReferencesSize;
-    }
+    cp2->relevantReferences = cp->relevantReferences;
 
     /* Copy the description */
     retval = UA_BrowseDescription_copy(descr, &cp2->browseDescription);
@@ -818,228 +875,112 @@ UA_Server_browseNext(UA_Server *server, UA_Boolean releaseContinuationPoint,
 /* TranslateBrowsePath */
 /***********************/
 
-static void
-walkBrowsePathElementReferenceTargets(UA_BrowsePathResult *result, size_t *targetsSize,
-                                      UA_NodeId **next, size_t *nextSize, size_t *nextCount,
-                                      UA_UInt32 elemDepth, const UA_NodeReferenceKind *rk) {
-    /* Loop over the targets */
-    for(size_t i = 0; i < rk->refTargetsSize; i++) {
-        UA_ExpandedNodeId *targetId = &rk->refTargets[i].target;
-
-        /* Does the reference point to an external server? Then add to the
-         * targets with the right path depth. */
-        if(targetId->serverIndex != 0) {
-            UA_BrowsePathTarget *tempTargets =
-                (UA_BrowsePathTarget*)UA_realloc(result->targets,
-                             sizeof(UA_BrowsePathTarget) * (*targetsSize) * 2);
-            if(!tempTargets) {
-                result->statusCode = UA_STATUSCODE_BADOUTOFMEMORY;
-                return;
-            }
-            result->targets = tempTargets;
-            (*targetsSize) *= 2;
-            result->statusCode = UA_ExpandedNodeId_copy(targetId,
-                       &result->targets[result->targetsSize].targetId);
-            result->targets[result->targetsSize].remainingPathIndex = elemDepth;
-            continue;
-        }
-
-        /* Can we store the node in the array of candidates for deep-search? */
-        if(*nextSize <= *nextCount) {
-            UA_NodeId *tempNext =
-                (UA_NodeId*)UA_realloc(*next, sizeof(UA_NodeId) * (*nextSize) * 2);
-            if(!tempNext) {
-                result->statusCode = UA_STATUSCODE_BADOUTOFMEMORY;
-                return;
-            }
-            *next = tempNext;
-            (*nextSize) *= 2;
-        }
-
-        /* Add the node to the next array for the following path element */
-        result->statusCode = UA_NodeId_copy(&targetId->nodeId,
-                                            &(*next)[*nextCount]);
-        if(result->statusCode != UA_STATUSCODE_GOOD)
-            return;
-        ++(*nextCount);
-    }
+static UA_StatusCode
+addBrowseTarget(RefTree *next, const UA_ReferenceTarget *rt) {
+    UA_assert(rt);
+    UA_StatusCode res = RefTree_add(next, &rt->targetId, NULL);
+    UA_ReferenceTarget *left = ZIP_LEFT(rt, nameTreeFields);
+    if(left && left->targetNameHash == rt->targetNameHash)
+        res |= addBrowseTarget(next, left);
+    UA_ReferenceTarget *right = ZIP_RIGHT(rt, nameTreeFields);
+    if(right && right->targetNameHash == rt->targetNameHash)
+        res |= addBrowseTarget(next, right);
+    return res;
 }
 
-static void
-walkBrowsePathElement(UA_Server *server, UA_Session *session, UA_UInt32 nodeClassMask,
-                      UA_BrowsePathResult *result, size_t *targetsSize,
-                      const UA_RelativePathElement *elem, UA_UInt32 elemDepth,
-                      const UA_QualifiedName *targetName,
-                      const UA_NodeId *current, const size_t currentCount,
-                      UA_NodeId **next, size_t *nextSize, size_t *nextCount) {
-    /* Return all references? */
-    UA_Boolean all_refs = UA_NodeId_isNull(&elem->referenceTypeId);
-    if(!all_refs) {
-        const UA_Node *rootRef = UA_NODESTORE_GET(server, &elem->referenceTypeId);
-        if(!rootRef)
-            return;
-        UA_Boolean match = (rootRef->nodeClass == UA_NODECLASS_REFERENCETYPE);
-        UA_NODESTORE_RELEASE(server, rootRef);
-        if(!match)
-            return;
+static UA_StatusCode
+walkBrowsePathElement(UA_Server *server, UA_Session *session,
+                      const UA_RelativePath *path, const size_t pathIndex, UA_UInt32 nodeClassMask,
+                      const UA_QualifiedName *lastBrowseName, UA_BrowsePathResult *result,
+                      RefTree *current, RefTree *next) {
+    /* For the next level. Note the difference from lastBrowseName */
+    const UA_RelativePathElement *elem = &path->elements[pathIndex];
+    UA_UInt32 browseNameHash = UA_QualifiedName_hash(&elem->targetName);
+
+    /* Get the relevant ReferenceTypes */
+    UA_StatusCode res = UA_STATUSCODE_GOOD;
+    UA_ReferenceTypeSet refTypes;
+    if(!UA_NodeId_isNull(&elem->referenceTypeId)) {
+        UA_ReferenceTypeSet_any(&refTypes);
+    } else {
+        res = referenceTypeIndices(server, &elem->referenceTypeId,
+                                   &refTypes, elem->includeSubtypes);
+        if(res != UA_STATUSCODE_GOOD)
+            return UA_STATUSCODE_BADNOMATCH;
     }
 
-    /* Iterate over all nodes at the current depth-level */
-    for(size_t i = 0; i < currentCount; ++i) {
-        /* Get the node */
-        const UA_Node *node = UA_NODESTORE_GET(server, &current[i]);
-        if(!node) {
-            /* If we cannot find the node at depth 0, the starting node does not exist */
-            if(elemDepth == 0)
-                result->statusCode = UA_STATUSCODE_BADNODEIDUNKNOWN;
+    /* Loop over all Nodes int the current depth level */
+    for(size_t i = 0; i < current->size; i++) {
+        /* Remote Node. Immediately add to the results with the RemainingPathIndex set. */
+        if(current->targets[i].serverIndex > 0 ||
+           current->targets[i].namespaceUri.length > 0) {
+            /* Increase the size of the results array */
+            UA_BrowsePathTarget *tmpResults = (UA_BrowsePathTarget*)
+                UA_realloc(result->targets, sizeof(UA_BrowsePathTarget) *
+                           (result->targetsSize + 1));
+            if(!tmpResults)
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            result->targets = tmpResults;
+
+            /* Copy over the result */
+            res = UA_ExpandedNodeId_copy(&current->targets[i],
+                                         &result->targets[result->targetsSize].targetId);
+            result->targets[result->targetsSize].remainingPathIndex = (UA_UInt32)pathIndex;
+            result->targetsSize++;
+            if(res != UA_STATUSCODE_GOOD)
+                break;
             continue;
         }
+
+        /* Local Node. Add to the tree of results at the next depth. */
+        const UA_Node *node = UA_NODESTORE_GET(server, &current->targets[i].nodeId);
+        if(!node)
+            continue;
 
         /* Test whether the node fits the class mask */
-        if(!matchClassMask(node, nodeClassMask)) {
+        UA_Boolean skip = !matchClassMask(node, nodeClassMask);
+
+        /* Does the BrowseName match for the current node (not the rerences
+         * going out here) */
+        skip |= (lastBrowseName && !UA_QualifiedName_equal(lastBrowseName, &node->head.browseName));
+
+        if(skip) {
             UA_NODESTORE_RELEASE(server, node);
             continue;
         }
 
-        /* Test whether the node has the target name required in the previous
-         * path element */
-        if(targetName && (targetName->namespaceIndex != node->browseName.namespaceIndex ||
-                          !UA_String_equal(&targetName->name, &node->browseName.name))) {
-            UA_NODESTORE_RELEASE(server, node);
-            continue;
-        }
-
-        /* Loop over the nodes references */
-        for(size_t r = 0; r < node->referencesSize &&
-                result->statusCode == UA_STATUSCODE_GOOD; ++r) {
-            UA_NodeReferenceKind *rk = &node->references[r];
+        /* Loop over the ReferenceKinds */
+        for(size_t j = 0; j < node->head.referencesSize; j++) {
+            UA_NodeReferenceKind *rk = &node->head.references[j];
 
             /* Does the direction of the reference match? */
             if(rk->isInverse != elem->isInverse)
                 continue;
 
-            /* Is the node relevant? */
-            if(!all_refs) {
-                if(!elem->includeSubtypes && !UA_NodeId_equal(&rk->referenceTypeId, &elem->referenceTypeId))
-                    continue;
-                if(!isNodeInTree(server, &rk->referenceTypeId, &elem->referenceTypeId, &subtypeId, 1))
-                    continue;
-            }
+            /* Does the reference type match? */
+            if(!UA_ReferenceTypeSet_contains(&refTypes, rk->referenceTypeIndex))
+                continue;
 
-            /* Walk over the reference targets */
-            walkBrowsePathElementReferenceTargets(result, targetsSize, next, nextSize,
-                                                  nextCount, elemDepth, rk);
+            /* Retrieve by BrowseName hash */
+            UA_ReferenceTarget *rt = ZIP_FIND(UA_ReferenceTargetNameTree,
+                                              &rk->refTargetsNameTree, &browseNameHash);
+            if(!rt)
+                continue;
+
+            res = addBrowseTarget(next, rt);
+            if(res != UA_STATUSCODE_GOOD)
+                break;
         }
 
         UA_NODESTORE_RELEASE(server, node);
     }
-}
-
-/* This assumes that result->targets has enough room for all currentCount elements */
-static void
-addBrowsePathTargets(UA_Server *server, UA_Session *session, UA_UInt32 nodeClassMask,
-                     UA_BrowsePathResult *result, const UA_QualifiedName *targetName,
-                     UA_NodeId *current, size_t currentCount) {
-    for(size_t i = 0; i < currentCount; i++) {
-        const UA_Node *node = UA_NODESTORE_GET(server, &current[i]);
-        if(!node) {
-            UA_NodeId_clear(&current[i]);
-            continue;
-        }
-
-        /* Test whether the node fits the class mask */
-        UA_Boolean skip = !matchClassMask(node, nodeClassMask);
-
-        /* Test whether the node has the target name required in the
-         * previous path element */
-        if(targetName->namespaceIndex != node->browseName.namespaceIndex ||
-           !UA_String_equal(&targetName->name, &node->browseName.name))
-            skip = true;
-
-        UA_NODESTORE_RELEASE(server, node);
-
-        if(skip) {
-            UA_NodeId_clear(&current[i]);
-            continue;
-        }
-
-        /* Move the nodeid to the target array */
-        UA_BrowsePathTarget_init(&result->targets[result->targetsSize]);
-        result->targets[result->targetsSize].targetId.nodeId = current[i];
-        result->targets[result->targetsSize].remainingPathIndex = UA_UINT32_MAX;
-        ++result->targetsSize;
-    }
-}
-
-static void
-walkBrowsePath(UA_Server *server, UA_Session *session, const UA_BrowsePath *path,
-               UA_UInt32 nodeClassMask, UA_BrowsePathResult *result, size_t targetsSize,
-               UA_NodeId **current, size_t *currentSize, size_t *currentCount,
-               UA_NodeId **next, size_t *nextSize, size_t *nextCount) {
-    UA_assert(*currentCount == 1);
-    UA_assert(*nextCount == 0);
-
-    /* Points to the targetName of the _previous_ path element */
-    const UA_QualifiedName *targetName = NULL;
-
-    /* Iterate over path elements */
-    UA_assert(path->relativePath.elementsSize > 0);
-    for(UA_UInt32 i = 0; i < path->relativePath.elementsSize; ++i) {
-        walkBrowsePathElement(server, session, nodeClassMask, result, &targetsSize,
-                              &path->relativePath.elements[i], i, targetName,
-                              *current, *currentCount, next, nextSize, nextCount);
-
-        /* Clean members of current */
-        for(size_t j = 0; j < *currentCount; j++)
-            UA_NodeId_clear(&(*current)[j]);
-        *currentCount = 0;
-
-        /* When no targets are left or an error occurred. None of next's
-         * elements will be copied to result->targets */
-        if(*nextCount == 0 || result->statusCode != UA_STATUSCODE_GOOD) {
-            UA_assert(*currentCount == 0);
-            UA_assert(*nextCount == 0);
-            return;
-        }
-
-        /* Exchange current and next for the next depth */
-        size_t tSize = *currentSize; size_t tCount = *currentCount; UA_NodeId *tT = *current;
-        *currentSize = *nextSize; *currentCount = *nextCount; *current = *next;
-        *nextSize = tSize; *nextCount = tCount; *next = tT;
-
-        /* Store the target name of the previous path element */
-        targetName = &path->relativePath.elements[i].targetName;
-    }
-
-    UA_assert(targetName != NULL);
-    UA_assert(*nextCount == 0);
-
-    /* After the last BrowsePathElement, move members from current to the
-     * result targets */
-
-    /* Realloc if more space is needed */
-    if(targetsSize < result->targetsSize + (*currentCount)) {
-        UA_BrowsePathTarget *newTargets =
-            (UA_BrowsePathTarget*)UA_realloc(result->targets, sizeof(UA_BrowsePathTarget) *
-                                             (result->targetsSize + (*currentCount)));
-        if(!newTargets) {
-            result->statusCode = UA_STATUSCODE_BADOUTOFMEMORY;
-            for(size_t i = 0; i < *currentCount; ++i)
-                UA_NodeId_clear(&(*current)[i]);
-            *currentCount = 0;
-            return;
-        }
-        result->targets = newTargets;
-    }
-
-    /* Move the elements of current to the targets */
-    addBrowsePathTargets(server, session, nodeClassMask, result, targetName, *current, *currentCount);
-    *currentCount = 0;
+    return res;
 }
 
 static void
 Operation_TranslateBrowsePathToNodeIds(UA_Server *server, UA_Session *session,
-                                       const UA_UInt32 *nodeClassMask, const UA_BrowsePath *path,
+                                       const UA_UInt32 *nodeClassMask,
+                                       const UA_BrowsePath *path,
                                        UA_BrowsePathResult *result) {
     UA_LOCK_ASSERT(server->serviceMutex, 1);
 
@@ -1056,66 +997,100 @@ Operation_TranslateBrowsePathToNodeIds(UA_Server *server, UA_Session *session,
         }
     }
 
-    /* Allocate memory for the targets */
-    size_t targetsSize = 10; /* When to realloc; the member count is stored in
-                              * result->targetsSize */
-    result->targets =
-        (UA_BrowsePathTarget*)UA_malloc(sizeof(UA_BrowsePathTarget) * targetsSize);
-    if(!result->targets) {
+    /* Check if the starting node exists */
+    const UA_Node *startingNode = UA_NODESTORE_GET(server, &path->startingNode);
+    if(!startingNode) {
+        result->statusCode = UA_STATUSCODE_BADNODEIDUNKNOWN;
+        return;
+    }
+    UA_NODESTORE_RELEASE(server, startingNode);
+
+    /* Create two RefTrees that are alternated between path elements */
+    RefTree rt1, rt2, *current = &rt1, *next = &rt2, *tmp;
+    result->statusCode |= RefTree_init(&rt1);
+    result->statusCode |= RefTree_init(&rt2);
+    UA_BrowsePathTarget *tmpResults = NULL;
+    UA_QualifiedName *browseNameFilter = NULL;
+    if(result->statusCode != UA_STATUSCODE_GOOD)
+        goto cleanup;
+
+    /* Copy the starting node into next */
+    UA_ExpandedNodeId startingNodeId;
+    UA_ExpandedNodeId_init(&startingNodeId);
+    startingNodeId.nodeId = path->startingNode;
+    result->statusCode = RefTree_add(next, &startingNodeId, NULL);
+    if(result->statusCode != UA_STATUSCODE_GOOD)
+        goto cleanup;
+
+    /* Walk the path elements. Retrieve the nodes only once from the NodeStore.
+     * Hence the BrowseName is checked with one element "delay". */
+    for(size_t i = 0; i < path->relativePath.elementsSize; i++) {
+        /* Switch the trees */
+        tmp = current;
+        current = next;
+        next = tmp;
+
+        /* Clear up current, keep the capacity */
+        for(size_t j = 0; j < next->size; j++)
+            UA_ExpandedNodeId_clear(&next->targets[j]);
+        next->size = 0;
+        ZIP_INIT(&next->head);
+
+        /* Do this check after next->size has been set to zero */
+        if(current->size == 0)
+            break;
+
+        /* Walk element for all NodeIds in the "current" tree.
+         * Puts new results in the "next" tree. */
+        result->statusCode =
+            walkBrowsePathElement(server, session, &path->relativePath, i,
+                                  *nodeClassMask, browseNameFilter, result, current, next);
+        if(result->statusCode != UA_STATUSCODE_GOOD)
+            goto cleanup;
+
+        browseNameFilter = &path->relativePath.elements[i].targetName;
+    }
+
+    /* Allocate space for the results array */
+    tmpResults = (UA_BrowsePathTarget*)
+        UA_realloc(result->targets, sizeof(UA_BrowsePathTarget) *
+                   (result->targetsSize + next->size));
+    if(!tmpResults) {
         result->statusCode = UA_STATUSCODE_BADOUTOFMEMORY;
-        return;
+        goto cleanup;
     }
+    result->targets = tmpResults;
 
-    /* Allocate memory for two temporary arrays. One with the results for the
-     * previous depth of the path. The other for the new results at the current
-     * depth. The two arrays alternate as we descend down the tree. */
-    size_t currentSize = 10; /* When to realloc */
-    size_t currentCount = 0; /* Current elements */
-    UA_NodeId *current = (UA_NodeId*)UA_malloc(sizeof(UA_NodeId) * currentSize);
-    if(!current) {
-        result->statusCode = UA_STATUSCODE_BADOUTOFMEMORY;
-        UA_free(result->targets);
-        return;
+    for(size_t k = 0; k < next->size; k++) {
+        /* Check the BrowseName. It has been filtered only via its hash so far. */
+        const UA_Node *node = UA_NODESTORE_GET(server, &next->targets[k].nodeId);
+        if(!node)
+            continue;
+        UA_Boolean match = UA_QualifiedName_equal(browseNameFilter, &node->head.browseName);
+        UA_NODESTORE_RELEASE(server, node);
+        if(!match)
+            continue;
+
+        /* Move to the target to the results array */
+        result->targets[result->targetsSize].targetId = next->targets[k];
+        result->targets[result->targetsSize].remainingPathIndex = UA_UINT32_MAX;
+        UA_ExpandedNodeId_init(&next->targets[k]);
+        result->targetsSize++;
     }
-    size_t nextSize = 10; /* When to realloc */
-    size_t nextCount = 0; /* Current elements */
-    UA_NodeId *next = (UA_NodeId*)UA_malloc(sizeof(UA_NodeId) * nextSize);
-    if(!next) {
-        result->statusCode = UA_STATUSCODE_BADOUTOFMEMORY;
-        UA_free(result->targets);
-        UA_free(current);
-        return;
-    }
-
-    /* Copy the starting node into current */
-    result->statusCode = UA_NodeId_copy(&path->startingNode, &current[0]);
-    if(result->statusCode != UA_STATUSCODE_GOOD) {
-        UA_free(result->targets);
-        UA_free(current);
-        UA_free(next);
-        return;
-    }
-    currentCount = 1;
-
-    /* Walk the path elements */
-    walkBrowsePath(server, session, path, *nodeClassMask, result, targetsSize,
-                   &current, &currentSize, &currentCount,
-                   &next, &nextSize, &nextCount);
-
-    UA_assert(currentCount == 0);
-    UA_assert(nextCount == 0);
 
     /* No results => BadNoMatch status code */
     if(result->targetsSize == 0 && result->statusCode == UA_STATUSCODE_GOOD)
         result->statusCode = UA_STATUSCODE_BADNOMATCH;
 
     /* Clean up the temporary arrays and the targets */
-    UA_free(current);
-    UA_free(next);
+ cleanup:
+    RefTree_clear(&rt1);
+    RefTree_clear(&rt2);
     if(result->statusCode != UA_STATUSCODE_GOOD) {
         for(size_t i = 0; i < result->targetsSize; ++i)
             UA_BrowsePathTarget_clear(&result->targets[i]);
-        UA_free(result->targets);
+        if(result->targets)
+            UA_free(result->targets);
         result->targets = NULL;
         result->targetsSize = 0;
     }
@@ -1201,7 +1176,7 @@ UA_BrowsePathResult
 UA_Server_browseSimplifiedBrowsePath(UA_Server *server, const UA_NodeId origin,
                            size_t browsePathSize, const UA_QualifiedName *browsePath) {
     UA_LOCK(server->serviceMutex);
-    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, origin, browsePathSize, browsePath);;
+    UA_BrowsePathResult bpr = browseSimplifiedBrowsePath(server, origin, browsePathSize, browsePath);
     UA_UNLOCK(server->serviceMutex);
     return bpr;
 }

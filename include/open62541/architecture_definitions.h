@@ -35,6 +35,86 @@
 # endif
 #endif
 
+/* Include inttypes.h or workaround for older Visual Studios */
+#if !defined(_MSC_VER) || _MSC_VER >= 1800
+# include <inttypes.h>
+#else
+# define __PRI_8_LENGTH_MODIFIER__ "hh"
+# define __PRI_64_LENGTH_MODIFIER__ "ll"
+
+# define PRId8         __PRI_8_LENGTH_MODIFIER__ "d"
+# define PRIi8         __PRI_8_LENGTH_MODIFIER__ "i"
+# define PRIo8         __PRI_8_LENGTH_MODIFIER__ "o"
+# define PRIu8         __PRI_8_LENGTH_MODIFIER__ "u"
+# define PRIx8         __PRI_8_LENGTH_MODIFIER__ "x"
+# define PRIX8         __PRI_8_LENGTH_MODIFIER__ "X"
+
+# define PRId16        "hd"
+# define PRIi16        "hi"
+# define PRIo16        "ho"
+# define PRIu16        "hu"
+# define PRIx16        "hx"
+# define PRIX16        "hX"
+
+# define PRId32        "ld"
+# define PRIi32        "li"
+# define PRIo32        "lo"
+# define PRIu32        "lu"
+# define PRIx32        "lx"
+# define PRIX32        "lX"
+
+# define PRId64        __PRI_64_LENGTH_MODIFIER__ "d"
+# define PRIi64        __PRI_64_LENGTH_MODIFIER__ "i"
+# define PRIo64        __PRI_64_LENGTH_MODIFIER__ "o"
+# define PRIu64        __PRI_64_LENGTH_MODIFIER__ "u"
+# define PRIx64        __PRI_64_LENGTH_MODIFIER__ "x"
+# define PRIX64        __PRI_64_LENGTH_MODIFIER__ "X"
+#endif
+
+/**
+ * Memory Management
+ * -----------------
+ *
+ * The flag ``UA_ENABLE_MALLOC_SINGLETON`` enables singleton (global) variables
+ * with method pointers for memory management (malloc et al.). The method
+ * pointers can be switched out at runtime. Use-cases for this are testing of
+ * constrained memory conditions and arena-based custom memory management.
+ *
+ * If the flag is undefined, then ``UA_malloc`` etc. are set to the default
+ * malloc, as defined in ``/arch/<architecture>/ua_architecture.h``.
+ */
+
+#ifdef UA_ENABLE_MALLOC_SINGLETON
+extern void * (*UA_mallocSingleton)(size_t size);
+extern void (*UA_freeSingleton)(void *ptr);
+extern void * (*UA_callocSingleton)(size_t nelem, size_t elsize);
+extern void * (*UA_reallocSingleton)(void *ptr, size_t size);
+# define UA_malloc(size) UA_mallocSingleton(size)
+# define UA_free(ptr) UA_freeSingleton(ptr)
+# define UA_calloc(num, size) UA_callocSingleton(num, size)
+# define UA_realloc(ptr, size) UA_reallocSingleton(ptr, size)
+#endif
+
+/* Stack-allocation of memory. Use C99 variable-length arrays if possible.
+ * Otherwise revert to alloca. Note that alloca is not supported on some
+ * plattforms. */
+#ifndef UA_STACKARRAY
+# if defined(__GNUC__) || defined(__clang__)
+#  define UA_STACKARRAY(TYPE, NAME, SIZE) TYPE NAME[SIZE]
+# else
+# if defined(__GNUC__) || defined(__clang__)
+#  define UA_alloca(size) __builtin_alloca (size)
+# elif defined(_WIN32)
+#  define UA_alloca(SIZE) _alloca(SIZE)
+# else
+#  include <alloca.h>
+#  define UA_alloca(SIZE) alloca(SIZE)
+# endif
+#  define UA_STACKARRAY(TYPE, NAME, SIZE) \
+    TYPE *NAME = (TYPE*)UA_alloca(sizeof(TYPE) * SIZE)
+# endif
+#endif
+
 /**
  * Assertions
  * ----------
@@ -270,7 +350,6 @@ UA_STATIC_ASSERT(sizeof(bool) == 1, cannot_overlay_integers_with_large_bool);
 #else
 # define UA_BINARY_OVERLAYABLE_FLOAT 0
 #endif
-
 
 /* Atomic Operations
  * -----------------
