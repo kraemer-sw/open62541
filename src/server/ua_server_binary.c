@@ -286,7 +286,7 @@ getServicePointers(UA_UInt32 requestTypeId, const UA_DataType **requestType,
 /* HEL -> Open up the connection */
 static UA_StatusCode
 processHEL(UA_Server *server, UA_SecureChannel *channel, const UA_ByteString *msg) {
-    if(channel->state != UA_SECURECHANNELSTATE_CLOSED)
+    if(channel->state != UA_SECURECHANNELSTATE_FRESH)
         return UA_STATUSCODE_BADINTERNALERROR;
     size_t offset = 0; /* Go to the beginning of the TcpHelloMessage */
     UA_TcpHelloMessage helloMessage;
@@ -697,9 +697,11 @@ processMSG(UA_Server *server, UA_SecureChannel *channel,
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     /* Set the authenticationToken from the create session request to help
      * fuzzing cover more lines */
-    UA_NodeId_clear(&requestHeader->authenticationToken);
-    if(!UA_NodeId_isNull(&unsafe_fuzz_authenticationToken))
+    if(!UA_NodeId_isNull(&unsafe_fuzz_authenticationToken) &&
+       !UA_NodeId_isNull(&requestHeader->authenticationToken)) {
+        UA_NodeId_clear(&requestHeader->authenticationToken);
         UA_NodeId_copy(&unsafe_fuzz_authenticationToken, &requestHeader->authenticationToken);
+    }
 #endif
 
     /* Prepare the respone and process the request */
