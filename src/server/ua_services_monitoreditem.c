@@ -14,6 +14,9 @@
  *    Copyright 2017-2018 (c) Thomas Stalder, Blue Time Concept SA
  *    Copyright 2018 (c) Fabian Arndt, Root-Core
  *    Copyright 2020 (c) Kalycito Infotech Private Limited
+ *    Copyright 2021 (c) Uranik, Berisha
+ *    Copyright 2021 (c) Ammar, Morshed
+ *    Copyright 2021 (c) Fraunhofer IOSB (Author: Andreas Ebner)
  */
 
 #include "ua_server_internal.h"
@@ -59,6 +62,8 @@ setAbsoluteFromPercentageDeadband(UA_Server *server, UA_Session *session,
     /* Compute the abs deadband */
     UA_Range *euRange = (UA_Range*)rangeVal.value.data;
     UA_Double absDeadband = (filter->deadbandValue/100.0) * (euRange->high - euRange->low);
+
+    UA_DataValue_clear(&rangeVal);
 
     /* EURange invalid or NaN? */
     if(absDeadband < 0.0 || absDeadband != absDeadband) {
@@ -140,7 +145,7 @@ checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
                                const UA_MonitoredItem *mon,
                                const UA_DataType* valueType,
                                UA_MonitoringParameters *params) {
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     /* Check the filter */
     if(mon->itemToMonitor.attributeId == UA_ATTRIBUTEID_EVENTNOTIFIER) {
@@ -166,7 +171,7 @@ checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
          * DataChangeFilter */
         if(params->filter.encoding != UA_EXTENSIONOBJECT_ENCODED_NOBODY &&
            params->filter.content.decoded.type != &UA_TYPES[UA_TYPES_DATACHANGEFILTER])
-            return UA_STATUSCODE_BADMONITOREDITEMFILTERUNSUPPORTED;
+            return UA_STATUSCODE_BADFILTERNOTALLOWED;
 
         /* Check the deadband and adjust if necessary. */
         if(params->filter.content.decoded.type == &UA_TYPES[UA_TYPES_DATACHANGEFILTER]) {
@@ -176,12 +181,14 @@ checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
             case UA_DEADBANDTYPE_NONE:
                 break;
             case UA_DEADBANDTYPE_ABSOLUTE:
-                if(!valueType || !UA_DataType_isNumeric(valueType))
+                if(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_VALUE ||
+                   !valueType || !UA_DataType_isNumeric(valueType))
                     return UA_STATUSCODE_BADFILTERNOTALLOWED;
                 break;
 #ifdef UA_ENABLE_DA
             case UA_DEADBANDTYPE_PERCENT: {
-                if(!valueType || !UA_DataType_isNumeric(valueType))
+                if(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_VALUE ||
+                   !valueType || !UA_DataType_isNumeric(valueType))
                     return UA_STATUSCODE_BADFILTERNOTALLOWED;
                 /* If percentage deadband is supported, look up the range values
                  * and precompute as if it was an absolute deadband. */
@@ -198,7 +205,8 @@ checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
         }
     }
 
-    /* Read the minimum sampling interval for the variable */
+    /* Read the minimum sampling interval for the variable. The sampling
+     * interval of the MonitoredItem must not be less than that. */
     if(mon->itemToMonitor.attributeId == UA_ATTRIBUTEID_VALUE) {
         const UA_Node *node = UA_NODESTORE_GET(server, &mon->itemToMonitor.nodeId);
         if(node) {
@@ -210,11 +218,18 @@ checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
         }
     }
         
-    /* Adjust to sampling interval to lie within the limits and check for NaN */
-    UA_BOUNDEDVALUE_SETWBOUNDS(server->config.samplingIntervalLimits,
-                               params->samplingInterval, params->samplingInterval);
-    if(mon->parameters.samplingInterval != mon->parameters.samplingInterval)
-        params->samplingInterval = server->config.samplingIntervalLimits.min;
+    /* Adjust to sampling interval to lie within the limits */
+    if(params->samplingInterval <= 0.0) {
+        /* A sampling interval of zero is possible and indicates that the
+         * MonitoredItem is checked for every write operation */
+        params->samplingInterval = 0.0;
+    } else {
+        UA_BOUNDEDVALUE_SETWBOUNDS(server->config.samplingIntervalLimits,
+                                   params->samplingInterval, params->samplingInterval);
+        /* Check for NaN */
+        if(mon->parameters.samplingInterval != mon->parameters.samplingInterval)
+            params->samplingInterval = server->config.samplingIntervalLimits.min;
+    }
 
     /* Adjust the maximum queue size */
 #ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
@@ -240,6 +255,57 @@ checkAdjustMonitoredItemParams(UA_Server *server, UA_Session *session,
     return UA_STATUSCODE_GOOD;
 }
 
+#ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
+static UA_StatusCode
+checkEventFilterParam(UA_Server *server, UA_Session *session,
+                      const UA_MonitoredItem *mon,
+                      UA_MonitoringParameters *params){
+    if(mon->itemToMonitor.attributeId != UA_ATTRIBUTEID_EVENTNOTIFIER)
+        return UA_STATUSCODE_GOOD;
+
+    UA_EventFilter *eventFilter =
+        (UA_EventFilter *) params->filter.content.decoded.data;
+
+    if(eventFilter == NULL)
+        return UA_STATUSCODE_BADEVENTFILTERINVALID;
+
+    //TODO make the maximum select clause size param an server-config parameter
+    if(eventFilter->selectClausesSize > 128)
+        return UA_STATUSCODE_BADCONFIGURATIONERROR;
+
+    //check the where clause for logical consistency
+    if(eventFilter->whereClause.elementsSize != 0) {
+        UA_ContentFilterResult contentFilterResult;
+        UA_Event_staticWhereClauseValidation(server, &eventFilter->whereClause,
+                                             &contentFilterResult);
+        for(size_t i = 0; i < contentFilterResult.elementResultsSize; ++i) {
+            if(contentFilterResult.elementResults[i].statusCode != UA_STATUSCODE_GOOD){
+                //ToDo currently we return the first non good status code, check if
+                //we can use the detailed contentFilterResult later
+                UA_StatusCode whereResult =
+                    contentFilterResult.elementResults[i].statusCode;
+                UA_ContentFilterResult_clear(&contentFilterResult);
+                return whereResult;
+            }
+        }
+        UA_ContentFilterResult_clear(&contentFilterResult);
+    }
+    //check the select clause for logical consistency
+    UA_StatusCode selectClauseValidationResult[128];
+    UA_Event_staticSelectClauseValidation(server,eventFilter,
+                                          selectClauseValidationResult);
+    for(size_t i = 0; i < eventFilter->selectClausesSize; ++i){
+        //ToDo currently we return the first non good status code, check if
+        //we can use the detailed status code list later
+        if(selectClauseValidationResult[i] != UA_STATUSCODE_GOOD){
+            return selectClauseValidationResult[i];
+        }
+    }
+
+    return UA_STATUSCODE_GOOD;
+}
+#endif
+
 static const UA_String
 binaryEncoding = {sizeof("Default Binary") - 1, (UA_Byte *)"Default Binary"};
 
@@ -258,7 +324,7 @@ Operation_CreateMonitoredItem(UA_Server *server, UA_Session *session,
                               struct createMonContext *cmc,
                               const UA_MonitoredItemCreateRequest *request,
                               UA_MonitoredItemCreateResult *result) {
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     /* Check available capacity */
     if(cmc->sub &&
@@ -285,18 +351,32 @@ Operation_CreateMonitoredItem(UA_Server *server, UA_Session *session,
         return;
     }
 
-    /* Make an example read to get errors in the itemToMonitor. Allow return
-     * codes "good" and "uncertain", as well as a list of statuscodes that might
-     * be repaired inside the data source. */
+    /* Make an example read to check the itemToMonitor. The DataSource itself
+     * could return a (temporary) error. This should still result in a valid
+     * MonitoredItem. Only a few StatusCodes are considered unrecoverable and
+     * lead to an abort:
+     * - The Node does not exist
+     * - The AttributeId does not match the NodeClass
+     * - The Session does not have sufficient access rights
+     * - The indicated encoding is not supported or not valid */
     UA_DataValue v = UA_Server_readWithSession(server, session, &request->itemToMonitor,
                                                cmc->timestampsToReturn);
-    if(v.hasStatus && (v.status >> 30) > 1 &&
-       v.status != UA_STATUSCODE_BADRESOURCEUNAVAILABLE &&
-       v.status != UA_STATUSCODE_BADCOMMUNICATIONERROR &&
-       v.status != UA_STATUSCODE_BADWAITINGFORINITIALDATA &&
-       v.status != UA_STATUSCODE_BADUSERACCESSDENIED &&
-       v.status != UA_STATUSCODE_BADNOTREADABLE &&
-       v.status != UA_STATUSCODE_BADINDEXRANGENODATA) {
+    if(v.hasStatus &&
+       (v.status == UA_STATUSCODE_BADNODEIDUNKNOWN ||
+        v.status == UA_STATUSCODE_BADATTRIBUTEIDINVALID ||
+        v.status == UA_STATUSCODE_BADDATAENCODINGUNSUPPORTED ||
+        v.status == UA_STATUSCODE_BADDATAENCODINGINVALID ||
+        v.status == UA_STATUSCODE_BADINDEXRANGEINVALID
+        /* Part 4, 5.12.2 CreateMonitoredItems: When a user adds a monitored
+         * item that the user is denied read access to, the add operation for
+         * the item shall succeed and the bad status Bad_NotReadable or
+         * Bad_UserAccessDenied shall be returned in the Publish response.
+         * v.status == UA_STATUSCODE_BADNOTREADABLE
+         * v.status == UA_STATUSCODE_BADUSERACCESSDENIED
+         *
+         * The IndexRange error can change depending on the value.
+         * v.status == UA_STATUSCODE_BADINDEXRANGENODATA */
+        )) {
         result->statusCode = v.status;
         UA_DataValue_clear(&v);
         return;
@@ -366,6 +446,10 @@ Operation_CreateMonitoredItem(UA_Server *server, UA_Session *session,
                                                        &newMon->parameters);
     result->statusCode |= checkAdjustMonitoredItemParams(server, session, newMon,
                                                          valueType, &newMon->parameters);
+#ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
+    result->statusCode |= checkEventFilterParam(server, session, newMon,
+                                                         &newMon->parameters);
+#endif
     if(result->statusCode != UA_STATUSCODE_GOOD) {
         UA_LOG_INFO_SUBSCRIPTION(&server->config.logger, cmc->sub,
                                  "Could not create a MonitoredItem "
@@ -375,13 +459,12 @@ Operation_CreateMonitoredItem(UA_Server *server, UA_Session *session,
         return;
     }
 
-    /* Register the Monitoreditem in the server and subscription. Add Events as
-     * "listeners" to the monitored Node. */
-    result->statusCode = UA_Server_registerMonitoredItem(server, newMon);
-    if(result->statusCode != UA_STATUSCODE_GOOD) {
-        UA_MonitoredItem_delete(server, newMon);
-        return;
-    }
+    /* Initialize the value status so the first sample always passes the filter */
+    newMon->lastValue.hasStatus = true;
+    newMon->lastValue.status = ~(UA_StatusCode)0;
+
+    /* Register the Monitoreditem in the server and subscription */
+    UA_Server_registerMonitoredItem(server, newMon);
 
     /* Activate the MonitoredItem */
     result->statusCode |=
@@ -391,23 +474,18 @@ Operation_CreateMonitoredItem(UA_Server *server, UA_Session *session,
         return;
     }
 
-    UA_LOG_INFO_SUBSCRIPTION(&server->config.logger, cmc->sub,
-                             "MonitoredItem %" PRIi32 " | "
-                             "Created the MonitoredItem "
-                             "(Sampling Interval: %fms, Queue Size: %lu)",
-                             newMon->monitoredItemId,
-                             newMon->parameters.samplingInterval,
-                             (unsigned long)newMon->queueSize);
-
-    /* Create the first sample */
-    if(request->monitoringMode > UA_MONITORINGMODE_DISABLED &&
-       newMon->itemToMonitor.attributeId != UA_ATTRIBUTEID_EVENTNOTIFIER)
-        monitoredItem_sampleCallback(server, newMon);
-
     /* Prepare the response */
     result->revisedSamplingInterval = newMon->parameters.samplingInterval;
     result->revisedQueueSize = newMon->parameters.queueSize;
     result->monitoredItemId = newMon->monitoredItemId;
+
+    UA_LOG_INFO_SUBSCRIPTION(&server->config.logger, cmc->sub,
+                             "MonitoredItem %" PRIi32 " | "
+                             "Created the MonitoredItem "
+                             "(Sampling Interval: %.2fms, Queue Size: %lu)",
+                             newMon->monitoredItemId,
+                             newMon->parameters.samplingInterval,
+                             (unsigned long)newMon->parameters.queueSize);
 }
 
 void
@@ -416,7 +494,7 @@ Service_CreateMonitoredItems(UA_Server *server, UA_Session *session,
                              UA_CreateMonitoredItemsResponse *response) {
     UA_LOG_DEBUG_SESSION(&server->config.logger, session,
                          "Processing CreateMonitoredItemsRequest");
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     if(server->config.maxMonitoredItemsPerCall != 0 &&
        request->itemsToCreateSize > server->config.maxMonitoredItemsPerCall) {
@@ -443,9 +521,12 @@ Service_CreateMonitoredItems(UA_Server *server, UA_Session *session,
     cmc.sub->currentLifetimeCount = 0;
 
     response->responseHeader.serviceResult =
-        UA_Server_processServiceOperations(server, session, (UA_ServiceOperation)Operation_CreateMonitoredItem, &cmc,
-                                           &request->itemsToCreateSize, &UA_TYPES[UA_TYPES_MONITOREDITEMCREATEREQUEST],
-                                           &response->resultsSize, &UA_TYPES[UA_TYPES_MONITOREDITEMCREATERESULT]);
+        UA_Server_processServiceOperations(server, session,
+                                           (UA_ServiceOperation)Operation_CreateMonitoredItem,
+                                           &cmc, &request->itemsToCreateSize,
+                                           &UA_TYPES[UA_TYPES_MONITOREDITEMCREATEREQUEST],
+                                           &response->resultsSize,
+                                           &UA_TYPES[UA_TYPES_MONITOREDITEMCREATERESULT]);
 }
 
 UA_MonitoredItemCreateResult
@@ -462,9 +543,9 @@ UA_Server_createDataChangeMonitoredItem(UA_Server *server,
 
     UA_MonitoredItemCreateResult result;
     UA_MonitoredItemCreateResult_init(&result);
-    UA_LOCK(server->serviceMutex);
+    UA_LOCK(&server->serviceMutex);
     Operation_CreateMonitoredItem(server, &server->adminSession, &cmc, &item, &result);
-    UA_UNLOCK(server->serviceMutex);
+    UA_UNLOCK(&server->serviceMutex);
     return result;
 }
 
@@ -512,7 +593,7 @@ Operation_ModifyMonitoredItem(UA_Server *server, UA_Session *session, UA_Subscri
 
     /* Re-register the callback if necessary */
     if(oldSamplingInterval != mon->parameters.samplingInterval) {
-        UA_MonitoredItem_unregisterSampleCallback(server, mon);
+        UA_MonitoredItem_unregisterSampling(server, mon);
         result->statusCode =
             UA_MonitoredItem_setMonitoringMode(server, mon, mon->monitoringMode);
     }
@@ -522,6 +603,9 @@ Operation_ModifyMonitoredItem(UA_Server *server, UA_Session *session, UA_Subscri
 
     /* Remove some notifications if the queue is now too small */
     UA_MonitoredItem_ensureQueueSpace(server, mon);
+
+    /* Remove the overflow bits if the queue has now a size of 1 */
+    UA_MonitoredItem_removeOverflowInfoBits(mon);
 
     UA_LOG_INFO_SUBSCRIPTION(&server->config.logger, sub,
                              "MonitoredItem %" PRIi32 " | "
@@ -538,7 +622,7 @@ Service_ModifyMonitoredItems(UA_Server *server, UA_Session *session,
                              UA_ModifyMonitoredItemsResponse *response) {
     UA_LOG_DEBUG_SESSION(&server->config.logger, session,
                          "Processing ModifyMonitoredItemsRequest");
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     if(server->config.maxMonitoredItemsPerCall != 0 &&
        request->itemsToModifySize > server->config.maxMonitoredItemsPerCall) {
@@ -563,9 +647,11 @@ Service_ModifyMonitoredItems(UA_Server *server, UA_Session *session,
 
     response->responseHeader.serviceResult =
         UA_Server_processServiceOperations(server, session,
-                  (UA_ServiceOperation)Operation_ModifyMonitoredItem, sub,
-                  &request->itemsToModifySize, &UA_TYPES[UA_TYPES_MONITOREDITEMMODIFYREQUEST],
-                  &response->resultsSize, &UA_TYPES[UA_TYPES_MONITOREDITEMMODIFYRESULT]);
+                                           (UA_ServiceOperation)Operation_ModifyMonitoredItem,
+                                           sub, &request->itemsToModifySize,
+                                           &UA_TYPES[UA_TYPES_MONITOREDITEMMODIFYREQUEST],
+                                           &response->resultsSize,
+                                           &UA_TYPES[UA_TYPES_MONITOREDITEMMODIFYRESULT]);
 }
 
 struct setMonitoringContext {
@@ -590,7 +676,7 @@ Service_SetMonitoringMode(UA_Server *server, UA_Session *session,
                           const UA_SetMonitoringModeRequest *request,
                           UA_SetMonitoringModeResponse *response) {
     UA_LOG_DEBUG_SESSION(&server->config.logger, session, "Processing SetMonitoringMode");
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     if(server->config.maxMonitoredItemsPerCall != 0 &&
        request->monitoredItemIdsSize > server->config.maxMonitoredItemsPerCall) {
@@ -611,15 +697,17 @@ Service_SetMonitoringMode(UA_Server *server, UA_Session *session,
     smc.monitoringMode = request->monitoringMode;
     response->responseHeader.serviceResult =
         UA_Server_processServiceOperations(server, session,
-                  (UA_ServiceOperation)Operation_SetMonitoringMode, &smc,
-                  &request->monitoredItemIdsSize, &UA_TYPES[UA_TYPES_UINT32],
-                  &response->resultsSize, &UA_TYPES[UA_TYPES_STATUSCODE]);
+                                           (UA_ServiceOperation)Operation_SetMonitoringMode,
+                                           &smc, &request->monitoredItemIdsSize,
+                                           &UA_TYPES[UA_TYPES_UINT32],
+                                           &response->resultsSize,
+                                           &UA_TYPES[UA_TYPES_STATUSCODE]);
 }
 
 static void
 Operation_DeleteMonitoredItem(UA_Server *server, UA_Session *session, UA_Subscription *sub,
                               const UA_UInt32 *monitoredItemId, UA_StatusCode *result) {
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
     UA_MonitoredItem *mon = UA_Subscription_getMonitoredItem(sub, *monitoredItemId);
     if(!mon) {
         *result = UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
@@ -634,7 +722,7 @@ Service_DeleteMonitoredItems(UA_Server *server, UA_Session *session,
                              UA_DeleteMonitoredItemsResponse *response) {
     UA_LOG_DEBUG_SESSION(&server->config.logger, session,
                          "Processing DeleteMonitoredItemsRequest");
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     if(server->config.maxMonitoredItemsPerCall != 0 &&
        request->monitoredItemIdsSize > server->config.maxMonitoredItemsPerCall) {
@@ -654,23 +742,25 @@ Service_DeleteMonitoredItems(UA_Server *server, UA_Session *session,
 
     response->responseHeader.serviceResult =
         UA_Server_processServiceOperations(server, session,
-                  (UA_ServiceOperation)Operation_DeleteMonitoredItem, sub,
-                  &request->monitoredItemIdsSize, &UA_TYPES[UA_TYPES_UINT32],
-                  &response->resultsSize, &UA_TYPES[UA_TYPES_STATUSCODE]);
+                                           (UA_ServiceOperation)Operation_DeleteMonitoredItem,
+                                           sub, &request->monitoredItemIdsSize,
+                                           &UA_TYPES[UA_TYPES_UINT32],
+                                           &response->resultsSize,
+                                           &UA_TYPES[UA_TYPES_STATUSCODE]);
 }
 
 UA_StatusCode
 UA_Server_deleteMonitoredItem(UA_Server *server, UA_UInt32 monitoredItemId) {
-    UA_LOCK(server->serviceMutex);
+    UA_LOCK(&server->serviceMutex);
     UA_MonitoredItem *mon, *mon_tmp;
     LIST_FOREACH_SAFE(mon, &server->localMonitoredItems, listEntry, mon_tmp) {
         if(mon->monitoredItemId != monitoredItemId)
             continue;
         UA_MonitoredItem_delete(server, mon);
-        UA_UNLOCK(server->serviceMutex);
+        UA_UNLOCK(&server->serviceMutex);
         return UA_STATUSCODE_GOOD;
     }
-    UA_UNLOCK(server->serviceMutex);
+    UA_UNLOCK(&server->serviceMutex);
     return UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
 }
 

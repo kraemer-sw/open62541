@@ -56,8 +56,7 @@ typedef struct {
     UA_Byte referenceTypeCounter;
 } ZipContext;
 
-ZIP_PROTOTYPE(NodeTree, NodeEntry, NodeEntry)
-ZIP_IMPL(NodeTree, NodeEntry, zipfields, NodeEntry, zipfields, cmpNodeId)
+ZIP_FUNCTIONS(NodeTree, NodeEntry, zipfields, NodeEntry, zipfields, cmpNodeId)
 
 static NodeEntry *
 newEntry(UA_NodeClass nodeClass) {
@@ -106,8 +105,18 @@ deleteEntry(NodeEntry *entry) {
 
 static void
 cleanupEntry(NodeEntry *entry) {
-    if(entry->deleted && entry->refCount == 0)
+    if(entry->refCount > 0)
+        return;
+    if(entry->deleted) {
         deleteEntry(entry);
+        return;
+    }
+    UA_NodeHead *head = (UA_NodeHead*)&entry->nodeId;
+    for(size_t i = 0; i < head->referencesSize; i++) {
+        UA_NodeReferenceKind *rk = &head->references[i];
+        if(rk->targetsSize > 16 && !rk->hasRefTree)
+            UA_NodeReferenceKind_switch(rk);
+    }
 }
 
 /***********************/
@@ -188,12 +197,21 @@ zipNsInsertNode(void *nsCtx, UA_Node *node, UA_NodeId *addedNodeId) {
 
     /* Ensure that the NodeId is unique */
     NodeEntry dummy;
+    memset(&dummy, 0, sizeof(NodeEntry));
     dummy.nodeId = node->head.nodeId;
     if(node->head.nodeId.identifierType == UA_NODEIDTYPE_NUMERIC &&
        node->head.nodeId.identifier.numeric == 0) {
         do { /* Create a random nodeid until we find an unoccupied id */
-            node->head.nodeId.identifier.numeric = UA_UInt32_random();
-            dummy.nodeId.identifier.numeric = node->head.nodeId.identifier.numeric;
+            UA_UInt32 numId = UA_UInt32_random();
+#if SIZE_MAX <= UA_UINT32_MAX
+            /* The compressed "immediate" representation of nodes does not
+             * support the full range on 32bit systems. Generate smaller
+             * identifiers as they can be stored more compactly. */
+            if(numId >= (0x01 << 24))
+                numId = numId % (0x01 << 24);
+#endif
+            node->head.nodeId.identifier.numeric = numId;
+            dummy.nodeId.identifier.numeric = numId;
             dummy.nodeIdHash = UA_NodeId_hash(&node->head.nodeId);
         } while(ZIP_FIND(NodeTree, &ns->root, &dummy));
     } else {
@@ -237,7 +255,7 @@ zipNsInsertNode(void *nsCtx, UA_Node *node, UA_NodeId *addedNodeId) {
 
     /* Insert the node */
     entry->nodeIdHash = dummy.nodeIdHash;
-    ZIP_INSERT(NodeTree, &ns->root, entry, ZIP_FFS32(UA_UInt32_random()));
+    ZIP_INSERT(NodeTree, &ns->root, entry, UA_UInt32_random());
     return UA_STATUSCODE_GOOD;
 }
 
@@ -289,7 +307,7 @@ zipNsRemoveNode(void *nsCtx, const UA_NodeId *nodeId) {
 static const UA_NodeId *
 zipNsGetReferenceTypeId(void *nsCtx, UA_Byte refTypeIndex) {
     ZipContext *ns = (ZipContext*)nsCtx;
-    if(refTypeIndex > ns->referenceTypeCounter)
+    if(refTypeIndex >= ns->referenceTypeCounter)
         return NULL;
     return &ns->referenceTypeIds[refTypeIndex];
 }

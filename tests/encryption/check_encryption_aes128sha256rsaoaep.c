@@ -10,6 +10,7 @@
 #include <open62541/client_config_default.h>
 #include <open62541/client_highlevel.h>
 #include <open62541/plugin/securitypolicy.h>
+#include <open62541/plugin/pki_default.h>
 #include <open62541/server.h>
 #include <open62541/server_config_default.h>
 
@@ -74,6 +75,8 @@ static void setup(void) {
                                                    trustList, trustListSize,
                                                    issuerList, issuerListSize,
                                                    revocationList, revocationListSize);
+    config->certificateVerification.clear(&config->certificateVerification);
+    UA_CertificateVerification_AcceptAll(&config->certificateVerification);
 
     /* Set the ApplicationUri used in the certificate */
     UA_String_clear(&config->applicationDescription.applicationUri);
@@ -107,12 +110,12 @@ START_TEST(encryption_connect) {
     UA_ByteString certificate;
     certificate.length = CERT_DER_LENGTH;
     certificate.data = CERT_DER_DATA;
-    ck_assert_int_ne(certificate.length, 0);
+    ck_assert_uint_ne(certificate.length, 0);
 
     UA_ByteString privateKey;
     privateKey.length = KEY_DER_LENGTH;
     privateKey.data = KEY_DER_DATA;
-    ck_assert_int_ne(privateKey.length, 0);
+    ck_assert_uint_ne(privateKey.length, 0);
 
     /* The Get endpoint (discovery service) is done with
      * security mode as none to see the server's capability
@@ -151,6 +154,8 @@ START_TEST(encryption_connect) {
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
                                          revocationList, revocationListSize);
+    cc->certificateVerification.clear(&cc->certificateVerification);
+    UA_CertificateVerification_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
     ck_assert(client != NULL);
@@ -188,12 +193,12 @@ START_TEST(encryption_connect_pem) {
     UA_ByteString certificate;
     certificate.length = CERT_PEM_LENGTH;
     certificate.data = CERT_PEM_DATA;
-    ck_assert_int_ne(certificate.length, 0);
+    ck_assert_uint_ne(certificate.length, 0);
 
     UA_ByteString privateKey;
     privateKey.length = KEY_PEM_LENGTH;
     privateKey.data = KEY_PEM_DATA;
-    ck_assert_int_ne(privateKey.length, 0);
+    ck_assert_uint_ne(privateKey.length, 0);
 
     /* The Get endpoint (discovery service) is done with
      * security mode as none to see the server's capability
@@ -232,6 +237,8 @@ START_TEST(encryption_connect_pem) {
     UA_ClientConfig_setDefaultEncryption(cc, certificate, privateKey,
                                          trustList, trustListSize,
                                          revocationList, revocationListSize);
+    cc->certificateVerification.clear(&cc->certificateVerification);
+    UA_CertificateVerification_AcceptAll(&cc->certificateVerification);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#Aes128_Sha256_RsaOaep");
     ck_assert(client != NULL);

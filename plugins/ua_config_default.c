@@ -42,7 +42,7 @@ UA_DURATIONRANGE(UA_Duration min, UA_Duration max) {
 }
 
 UA_Server *
-UA_Server_new() {
+UA_Server_new(void) {
     UA_ServerConfig config;
     memset(&config, 0, sizeof(UA_ServerConfig));
     /* Set a default logger and NodeStore for the initialization */
@@ -59,13 +59,13 @@ UA_Server_new() {
 /*******************************/
 
 const UA_ConnectionConfig UA_ConnectionConfig_default = {
-    0,     /* .protocolVersion */
-    65535, /* .sendBufferSize, 64k per chunk */
-    65535, /* .recvBufferSize, 64k per chunk */
-    0,     /* .localMaxMessageSize, 0 -> unlimited */
-    0,     /* .remoteMaxMessageSize, 0 -> unlimited */
-    0,     /* .localMaxChunkCount, 0 -> unlimited */
-    0      /* .remoteMaxChunkCount, 0 -> unlimited */
+    0,       /* .protocolVersion */
+    2 << 16, /* .sendBufferSize, 64k per chunk */
+    2 << 16, /* .recvBufferSize, 64k per chunk */
+    2 << 29, /* .localMaxMessageSize, 512 MB */
+    2 << 29, /* .remoteMaxMessageSize, 512 MB */
+    2 << 14, /* .localMaxChunkCount, 16k */
+    2 << 14  /* .remoteMaxChunkCount, 16k */
 };
 
 /***************************/
@@ -191,6 +191,7 @@ setDefaultConfig(UA_ServerConfig *conf) {
     /* conf->nodeLifecycle.destructor = NULL; */
     /* conf->nodeLifecycle.createOptionalChild = NULL; */
     /* conf->nodeLifecycle.generateChildNodeId = NULL; */
+    conf->modellingRulesOnInstances = UA_TRUE;
 
     /* Limits for SecureChannels */
     conf->maxSecureChannels = 40;
@@ -455,9 +456,9 @@ UA_ServerConfig_setMinimalCustomBuffer(UA_ServerConfig *config, UA_UInt16 portNu
     }
 
     /* Initialize the Access Control plugin */
-    retval = UA_AccessControl_default(config, true,
-                &config->securityPolicies[config->securityPoliciesSize-1].policyUri,
-                usernamePasswordsSize, usernamePasswords);
+    retval = UA_AccessControl_default(config, true, NULL,
+                                      &config->securityPolicies[config->securityPoliciesSize-1].policyUri,
+                                      usernamePasswordsSize, usernamePasswords);
     if(retval != UA_STATUSCODE_GOOD) {
         UA_ServerConfig_clean(config);
         return retval;
@@ -703,7 +704,12 @@ UA_ServerConfig_setDefaultWithSecurityPolicies(UA_ServerConfig *conf,
         return retval;
     }
 
-    retval = UA_AccessControl_default(conf, true,
+    UA_CertificateVerification accessControlVerification;
+    retval = UA_CertificateVerification_Trustlist(&accessControlVerification,
+                                                  trustList, trustListSize,
+                                                  issuerList, issuerListSize,
+                                                  revocationList, revocationListSize);
+    retval |= UA_AccessControl_default(conf, true, &accessControlVerification,
                 &conf->securityPolicies[conf->securityPoliciesSize-1].policyUri,
                 usernamePasswordsSize, usernamePasswords);
     if(retval != UA_STATUSCODE_GOOD) {
@@ -726,7 +732,7 @@ UA_ServerConfig_setDefaultWithSecurityPolicies(UA_ServerConfig *conf,
 /* Default Client Settings */
 /***************************/
 
-UA_Client * UA_Client_new() {
+UA_Client * UA_Client_new(void) {
     UA_ClientConfig config;
     memset(&config, 0, sizeof(UA_ClientConfig));
     config.logger.log = UA_Log_Stdout_log;
@@ -745,6 +751,12 @@ UA_ClientConfig_setDefault(UA_ClientConfig *config) {
        config->logger.context = NULL;
        config->logger.clear = UA_Log_Stdout_clear;
     }
+
+    if (config->sessionLocaleIdsSize > 0 && config->sessionLocaleIds) {
+        UA_Array_delete(config->sessionLocaleIds, config->sessionLocaleIdsSize, &UA_TYPES[UA_TYPES_LOCALEID]);
+    }
+    config->sessionLocaleIds = NULL;
+    config->sessionLocaleIds = 0;
 
     config->localConnectionConfig = UA_ConnectionConfig_default;
 

@@ -25,7 +25,7 @@ void UA_Session_init(UA_Session *session) {
 }
 
 void UA_Session_clear(UA_Session *session, UA_Server* server) {
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
     /* Remove all Subscriptions. This may send out remaining publish
      * responses. */
@@ -34,6 +34,10 @@ void UA_Session_clear(UA_Session *session, UA_Server* server) {
     TAILQ_FOREACH_SAFE(sub, &session->subscriptions, sessionListEntry, tempsub) {
         UA_Subscription_delete(server, sub);
     }
+#endif
+
+#ifdef UA_ENABLE_DIAGNOSTICS
+    deleteNode(server, session->sessionId, true);
 #endif
 
     UA_Session_detachFromSecureChannel(session);
@@ -49,12 +53,28 @@ void UA_Session_clear(UA_Session *session, UA_Server* server) {
     }
     session->continuationPoints = NULL;
     session->availableContinuationPoints = UA_MAXCONTINUATIONPOINTS;
+
+    UA_Array_delete(session->params, session->paramsSize,
+                    &UA_TYPES[UA_TYPES_KEYVALUEPAIR]);
+    session->params = NULL;
+    session->paramsSize = 0;
+
+    UA_Array_delete(session->localeIds, session->localeIdsSize,
+                    &UA_TYPES[UA_TYPES_STRING]);
+    session->localeIds = NULL;
+    session->localeIdsSize = 0;
+
+#ifdef UA_ENABLE_DIAGNOSTICS
+    UA_SessionDiagnosticsDataType_clear(&session->diagnostics);
+    UA_SessionSecurityDiagnosticsDataType_clear(&session->securityDiagnostics);
+#endif
 }
 
 void
 UA_Session_attachToSecureChannel(UA_Session *session, UA_SecureChannel *channel) {
     UA_Session_detachFromSecureChannel(session);
     session->header.channel = channel;
+    session->header.serverSession = true;
     SLIST_INSERT_HEAD(&channel->sessions, &session->header, next);
 }
 
@@ -71,6 +91,16 @@ UA_Session_detachFromSecureChannel(UA_Session *session) {
         SLIST_REMOVE(&channel->sessions, sh, UA_SessionHeader, next);
         break;
     }
+
+    /* Clean up the response queue. Their RequestId is bound to the
+     * SecureChannel so they cannot be reused. */
+#ifdef UA_ENABLE_SUBSCRIPTIONS
+    UA_PublishResponseEntry *pre;
+    while((pre = UA_Session_dequeuePublishReq(session))) {
+        UA_PublishResponse_clear(&pre->response);
+        UA_free(pre);
+    }
+#endif
 }
 
 UA_StatusCode
@@ -89,12 +119,15 @@ UA_Session_generateNonce(UA_Session *session) {
     }
 
     return channel->securityPolicy->symmetricModule.
-        generateNonce(channel->securityPolicy, &session->serverNonce);
+        generateNonce(channel->securityPolicy->policyContext, &session->serverNonce);
 }
 
 void UA_Session_updateLifetime(UA_Session *session) {
     session->validTill = UA_DateTime_nowMonotonic() +
         (UA_DateTime)(session->timeout * UA_DATETIME_MSEC);
+#ifdef UA_ENABLE_DIAGNOSTICS
+    session->diagnostics.clientLastContactTime = UA_DateTime_now();
+#endif
 }
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS
@@ -103,18 +136,28 @@ void
 UA_Session_attachSubscription(UA_Session *session, UA_Subscription *sub) {
     /* Attach to the session */
     sub->session = session;
-    TAILQ_INSERT_TAIL(&session->subscriptions, sub, sessionListEntry);
 
     /* Increase the count */
     session->subscriptionsSize++;
 
     /* Increase the number of outstanding retransmissions */
     session->totalRetransmissionQueueSize += sub->retransmissionQueueSize;
+
+    /* Insert at the end of the subscriptions of the same priority / just before
+     * the subscriptions with the next lower priority. */
+    UA_Subscription *after = NULL;
+    TAILQ_FOREACH(after, &session->subscriptions, sessionListEntry) {
+        if(after->priority < sub->priority) {
+            TAILQ_INSERT_BEFORE(after, sub, sessionListEntry);
+            return;
+        }
+    }
+    TAILQ_INSERT_TAIL(&session->subscriptions, sub, sessionListEntry);
 }
 
 void
 UA_Session_detachSubscription(UA_Server *server, UA_Session *session,
-                              UA_Subscription *sub) {
+                              UA_Subscription *sub, UA_Boolean releasePublishResponses) {
     /* Detach from the session */
     sub->session = NULL;
     TAILQ_REMOVE(&session->subscriptions, sub, sessionListEntry);
@@ -127,7 +170,7 @@ UA_Session_detachSubscription(UA_Server *server, UA_Session *session,
     session->totalRetransmissionQueueSize -= sub->retransmissionQueueSize;
     
     /* Send remaining publish responses if the last subscription was removed */
-    if(!TAILQ_EMPTY(&session->subscriptions))
+    if(!releasePublishResponses || !TAILQ_EMPTY(&session->subscriptions))
         return;
     UA_PublishResponseEntry *pre;
     while((pre = UA_Session_dequeuePublishReq(session))) {
@@ -172,18 +215,143 @@ UA_Session_dequeuePublishReq(UA_Session *session) {
     UA_PublishResponseEntry* entry = SIMPLEQ_FIRST(&session->responseQueue);
     if(entry) {
         SIMPLEQ_REMOVE_HEAD(&session->responseQueue, listEntry);
-        session->numPublishReq--;
+        session->responseQueueSize--;
     }
     return entry;
 }
 
 void
-UA_Session_queuePublishReq(UA_Session *session, UA_PublishResponseEntry* entry, UA_Boolean head) {
+UA_Session_queuePublishReq(UA_Session *session, UA_PublishResponseEntry* entry,
+                           UA_Boolean head) {
     if(!head)
         SIMPLEQ_INSERT_TAIL(&session->responseQueue, entry, listEntry);
     else
         SIMPLEQ_INSERT_HEAD(&session->responseQueue, entry, listEntry);
-    session->numPublishReq++;
+    session->responseQueueSize++;
 }
 
 #endif
+
+/* Session Handling */
+
+UA_StatusCode
+UA_Server_closeSession(UA_Server *server, const UA_NodeId *sessionId) {
+    UA_LOCK(&server->serviceMutex);
+    session_list_entry *entry;
+    UA_StatusCode res = UA_STATUSCODE_BADSESSIONIDINVALID;
+    LIST_FOREACH(entry, &server->sessions, pointers) {
+        if(UA_NodeId_equal(&entry->session.sessionId, sessionId)) {
+            UA_Server_removeSession(server, entry, UA_DIAGNOSTICEVENT_CLOSE);
+            res = UA_STATUSCODE_GOOD;
+            break;
+        }
+    }
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+UA_StatusCode
+UA_Server_setSessionParameter(UA_Server *server, const UA_NodeId *sessionId,
+                              const char *name, const UA_Variant *parameter) {
+    UA_LOCK(&server->serviceMutex);
+    UA_Session *session = UA_Server_getSessionById(server, sessionId);
+    UA_StatusCode res = UA_STATUSCODE_BADSESSIONIDINVALID;
+    if(session)
+        res = UA_KeyValueMap_set(&session->params, &session->paramsSize,
+                                 name, parameter);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+void
+UA_Server_deleteSessionParameter(UA_Server *server, const UA_NodeId *sessionId,
+                                 const char *name) {
+    UA_LOCK(&server->serviceMutex);
+    UA_Session *session = UA_Server_getSessionById(server, sessionId);
+    if(session)
+        UA_KeyValueMap_delete(&session->params, &session->paramsSize, name);
+    UA_UNLOCK(&server->serviceMutex);
+}
+
+UA_StatusCode
+UA_Server_getSessionParameter(UA_Server *server, const UA_NodeId *sessionId,
+                              const char *name, UA_Variant *outParameter) {
+    UA_LOCK(&server->serviceMutex);
+    if(!outParameter) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    UA_Session *session = UA_Server_getSessionById(server, sessionId);
+    if(!session) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADSESSIONIDINVALID;
+    }
+
+    const UA_Variant *param =
+        UA_KeyValueMap_get(session->params, session->paramsSize, name);
+    if(!param) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    UA_StatusCode res = UA_Variant_copy(param, outParameter);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+UA_StatusCode
+UA_Server_getSessionScalarParameter(UA_Server *server, const UA_NodeId *sessionId,
+                                    const char *name, const UA_DataType *type,
+                                    UA_Variant *outParameter) {
+    UA_LOCK(&server->serviceMutex);
+    if(!outParameter) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    UA_Session *session = UA_Server_getSessionById(server, sessionId);
+    if(!session) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADSESSIONIDINVALID;
+    }
+
+    const UA_Variant *param =
+        UA_KeyValueMap_get(session->params, session->paramsSize, name);
+    if(!param || !UA_Variant_hasScalarType(param, type)) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    UA_StatusCode res = UA_Variant_copy(param, outParameter);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+UA_StatusCode
+UA_Server_getSessionArrayParameter(UA_Server *server, const UA_NodeId *sessionId,
+                                   const char *name, const UA_DataType *type,
+                                   UA_Variant *outParameter) {
+    UA_LOCK(&server->serviceMutex);
+    if(!outParameter) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    UA_Session *session = UA_Server_getSessionById(server, sessionId);
+    if(!session) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADSESSIONIDINVALID;
+    }
+
+    const UA_Variant *param =
+        UA_KeyValueMap_get(session->params, session->paramsSize, name);
+    if(!param || !UA_Variant_hasArrayType(param, type)) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADNOTFOUND;
+    }
+
+    UA_StatusCode res = UA_Variant_copy(param, outParameter);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
