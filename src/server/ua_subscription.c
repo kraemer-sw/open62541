@@ -19,6 +19,7 @@
 
 #include "ua_server_internal.h"
 #include "ua_subscription.h"
+#include "itoa.h"
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS /* conditional compilation */
 
@@ -32,7 +33,7 @@ UA_Subscription_new(void) {
         return NULL;
 
     /* The first publish response is sent immediately */
-    newSub->state = UA_SUBSCRIPTIONSTATE_NORMAL;
+    newSub->state = UA_SUBSCRIPTIONSTATE_STOPPED;
 
     /* Even if the first publish response is a keepalive the sequence number is 1.
      * This can happen by a subscription without a monitored item (see CTT test scripts). */
@@ -43,41 +44,34 @@ UA_Subscription_new(void) {
     return newSub;
 }
 
+static void
+delayedFreeSubscription(void *app, void *context) {
+    UA_free(context);
+}
+
 void
 UA_Subscription_delete(UA_Server *server, UA_Subscription *sub) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
 
-    /* Unregister the publish callback */
-    Subscription_unregisterPublishCallback(server, sub);
+    UA_EventLoop *el = server->config.eventLoop;
+
+    /* Unregister the publish callback and possible delayed callback */
+    Subscription_setState(server, sub, UA_SUBSCRIPTIONSTATE_REMOVING);
+
+    /* Remove delayed callbacks for processing remaining notifications */
+    if(sub->delayedCallbackRegistered) {
+        el->removeDelayedCallback(el, &sub->delayedMoreNotifications);
+        sub->delayedCallbackRegistered = false;
+    }
 
     /* Remove the diagnostics object for the subscription */
 #ifdef UA_ENABLE_DIAGNOSTICS
-    if(sub->session) {
-        /* Use a browse path to find the node */
-        char subIdStr[32];
-        snprintf(subIdStr, 32, "%u", sub->subscriptionId);
-        UA_BrowsePath bp;
-        UA_BrowsePath_init(&bp);
-        bp.startingNode = sub->session->sessionId;
-        UA_RelativePathElement rpe[2];
-        memset(rpe, 0, sizeof(UA_RelativePathElement) * 2);
-        rpe[0].targetName = UA_QUALIFIEDNAME(0, "SubscriptionDiagnosticsArray");
-        rpe[1].targetName = UA_QUALIFIEDNAME(0, subIdStr);
-        bp.relativePath.elements = rpe;
-        bp.relativePath.elementsSize = 2;
-        UA_BrowsePathResult bpr = translateBrowsePathToNodeIds(server, &bp);
-
-        /* Delete all nodes matching the browse path */
-        for(size_t i = 0; i < bpr.targetsSize; i++) {
-            if(bpr.targets[i].remainingPathIndex < UA_UINT32_MAX)
-                continue;
-            deleteNode(server, bpr.targets[i].targetId.nodeId, true);
-        }
-        UA_BrowsePathResult_clear(&bpr);
-    }
+    if(!UA_NodeId_isNull(&sub->ns0Id))
+        deleteNode(server, sub->ns0Id, true);
+    UA_NodeId_clear(&sub->ns0Id);
 #endif
 
-    UA_LOG_INFO_SUBSCRIPTION(&server->config.logger, sub, "Subscription deleted");
+    UA_LOG_INFO_SUBSCRIPTION(server->config.logging, sub, "Subscription deleted");
 
     /* Detach from the session if necessary */
     if(sub->session)
@@ -111,15 +105,18 @@ UA_Subscription_delete(UA_Server *server, UA_Subscription *sub) {
     }
     UA_assert(sub->retransmissionQueueSize == 0);
 
-    /* Add a delayed callback to remove the Subscription when the current jobs
-     * have completed. Pointers to the subscription may still exist upwards in
-     * the call stack. */
-    sub->delayedFreePointers.callback = NULL;
-    sub->delayedFreePointers.application = server;
-    sub->delayedFreePointers.data = NULL;
-    sub->delayedFreePointers.nextTime = UA_DateTime_nowMonotonic() + 1;
-    sub->delayedFreePointers.interval = 0; /* Remove the structure */
-    UA_Timer_addTimerEntry(&server->timer, &sub->delayedFreePointers, NULL);
+    /* Pointers to the subscription may still exist upwards in the call stack.
+     * Add a delayed callback to remove the Subscription when the current jobs
+     * have completed. */
+    sub->delayedFreePointers.callback = delayedFreeSubscription;
+    sub->delayedFreePointers.application = NULL;
+    sub->delayedFreePointers.context = sub;
+    el->addDelayedCallback(el, &sub->delayedFreePointers);
+}
+
+void
+Subscription_resetLifetime(UA_Subscription *sub) {
+    sub->currentLifetimeCount = 0;
 }
 
 UA_MonitoredItem *
@@ -175,13 +172,13 @@ UA_Subscription_addRetransmissionMessage(UA_Server *server, UA_Subscription *sub
     /* Release the oldest entry if there is not enough space */
     UA_Session *session = sub->session;
     if(sub->retransmissionQueueSize >= UA_MAX_RETRANSMISSIONQUEUESIZE) {
-        UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+        UA_LOG_WARNING_SUBSCRIPTION(server->config.logging, sub,
                                     "Subscription retransmission queue overflow");
         removeOldestRetransmissionMessageFromSub(sub);
     } else if(session && server->config.maxRetransmissionQueueSize > 0 &&
               session->totalRetransmissionQueueSize >=
               server->config.maxRetransmissionQueueSize) {
-        UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+        UA_LOG_WARNING_SUBSCRIPTION(server->config.logging, sub,
                                     "Session-wide retransmission queue overflow");
         removeOldestRetransmissionMessageFromSession(sub->session);
     }
@@ -364,26 +361,21 @@ UA_Subscription_nextSequenceNumber(UA_UInt32 sequenceNumber) {
 }
 
 static void
-publishCallback(UA_Server *server, UA_Subscription *sub) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Subscription_publish(server, sub);
-    UA_UNLOCK(&server->serviceMutex);
-}
-
-static void
 sendStatusChangeDelete(UA_Server *server, UA_Subscription *sub,
                        UA_PublishResponseEntry *pre) {
     /* Cannot send out the StatusChange because no response is queued.
-     * Delete the Subscription without sending the StatusChange. */
+     * Delete the Subscription without sending the StatusChange, if the statusChange is Bad*/
     if(!pre) {
-        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
-                                  "Cannot send the StatusChange notification. "
-                                  "Removing the subscription.");
-        UA_Subscription_delete(server, sub);
+        UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub,
+                                  "Cannot send the StatusChange notification because no response is queued.");
+        if(UA_StatusCode_isBad(sub->statusChange)) {
+            UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub, "Removing the subscription.");
+            UA_Subscription_delete(server, sub);
+        }
         return;
     }
 
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+    UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub,
                               "Sending out a StatusChange "
                               "notification and removing the subscription");
 
@@ -398,16 +390,15 @@ sendStatusChangeDelete(UA_Server *server, UA_Subscription *sub,
     UA_ExtensionObject_setValue(&notificationData, &scn,
                                 &UA_TYPES[UA_TYPES_STATUSCHANGENOTIFICATION]);
 
-    response->responseHeader.timestamp = UA_DateTime_now();
     response->notificationMessage.notificationData = &notificationData;
     response->notificationMessage.notificationDataSize = 1;
     response->subscriptionId = sub->subscriptionId;
-    response->notificationMessage.publishTime = response->responseHeader.timestamp;
+    response->notificationMessage.publishTime = UA_DateTime_now();
     response->notificationMessage.sequenceNumber = sub->nextSequenceNumber;
 
     /* Send the response */
     UA_assert(sub->session); /* Otherwise pre is NULL */
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+    UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub,
                               "Sending out a publish response");
     sendResponse(server, sub->session, sub->session->header.channel, pre->requestId,
                  (UA_Response *)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
@@ -422,35 +413,54 @@ sendStatusChangeDelete(UA_Server *server, UA_Subscription *sub,
     UA_Subscription_delete(server, sub);
 }
 
-/* Called every time we set the subscription late (or it is still late) */
 static void
-UA_Subscription_isLate(UA_Subscription *sub) {
-    sub->state = UA_SUBSCRIPTIONSTATE_LATE;
-#ifdef UA_ENABLE_DIAGNOSTICS
-    sub->latePublishRequestCount++;
-#endif
+delayedPublishNotifications(UA_Server *server, UA_Subscription *sub) {
+    UA_LOCK(&server->serviceMutex);
+    sub->delayedCallbackRegistered = false;
+    UA_Subscription_publish(server, sub);
+    UA_UNLOCK(&server->serviceMutex);
 }
 
+/* Try to publish now. Enqueue a "next publish" as a delayed callback if not
+ * done. */
 void
 UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Publish Callback");
-    UA_assert(sub);
-
-    /* Dequeue a response */
+    /* Get a response */
     UA_PublishResponseEntry *pre = NULL;
-    if(sub->session)
-        pre = UA_Session_dequeuePublishReq(sub->session);
+    if(sub->session) {
+        UA_EventLoop *el = server->config.eventLoop;
+        UA_DateTime nowMonotonic = el->dateTime_nowMonotonic(el);
+        do {
+            /* Dequeue the oldest response */
+            pre = UA_Session_dequeuePublishReq(sub->session);
+            if(!pre)
+                break;
+
+            /* Check if the TimeoutHint is still valid. Otherwise return with a bad
+             * statuscode and continue. */
+            if(pre->maxTime < nowMonotonic) {
+                UA_LOG_DEBUG_SESSION(server->config.logging, sub->session,
+                                     "Publish request %u has timed out", pre->requestId);
+                pre->response.responseHeader.serviceResult = UA_STATUSCODE_BADTIMEOUT;
+                sendResponse(server, sub->session, sub->session->header.channel,
+                             pre->requestId, (UA_Response *)&pre->response,
+                             &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
+                UA_PublishResponse_clear(&pre->response);
+                UA_free(pre);
+                pre = NULL;
+            }
+        } while(!pre);
+    }
 
     /* Update the LifetimeCounter */
     if(pre) {
-        sub->currentLifetimeCount = 0;
+        Subscription_resetLifetime(sub);
     } else {
-        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+        UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub,
                                   "The publish queue is empty");
         ++sub->currentLifetimeCount;
         if(sub->currentLifetimeCount > sub->lifeTimeCount) {
-            UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+            UA_LOG_WARNING_SUBSCRIPTION(server->config.logging, sub,
                                         "End of subscription lifetime");
             /* Set the StatusChange to delete the subscription. */
             sub->statusChange = UA_STATUSCODE_BADTIMEOUT;
@@ -464,8 +474,11 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
         return;
     }
 
-    /* Count the available notifications */
-    UA_UInt32 notifications = (sub->publishingEnabled) ? sub->notificationQueueSize : 0;
+    /* Dsiabled subscriptions do not send notifications */
+    UA_UInt32 notifications = (sub->state == UA_SUBSCRIPTIONSTATE_ENABLED) ?
+        sub->notificationQueueSize : 0;
+
+    /* Limit the number of notifications to the configured maximum */
     if(notifications > sub->notificationsPerPublish)
         notifications = sub->notificationsPerPublish;
 
@@ -477,17 +490,17 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
                 UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
             return;
         }
-        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Sending a KeepAlive");
+        UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub, "Sending a KeepAlive");
     }
 
     /* We want to send a response, but cannot. Either because there is no queued
      * response or because the Subscription is detached from a Session or because
      * the SecureChannel for the Session is closed. */
     if(!pre || !sub->session || !sub->session->header.channel) {
-        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+        UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub,
                                   "Want to send a publish response but cannot. "
                                   "The subscription is late.");
-        UA_Subscription_isLate(sub);
+        sub->late = true;
         if(pre)
             UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
         return;
@@ -510,11 +523,10 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
             retransmission = (UA_NotificationMessageEntry*)
                 UA_malloc(sizeof(UA_NotificationMessageEntry));
             if(!retransmission) {
-                UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+                UA_LOG_WARNING_SUBSCRIPTION(server->config.logging, sub,
                                             "Could not allocate memory for retransmission. "
                                             "The subscription is late.");
-
-                UA_Subscription_isLate(sub);
+                sub->late = true;
                 UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
                 return;
             }
@@ -524,13 +536,13 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
         UA_StatusCode retval =
             prepareNotificationMessage(server, sub, message, notifications);
         if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+            UA_LOG_WARNING_SUBSCRIPTION(server->config.logging, sub,
                                         "Could not prepare the notification message. "
                                         "The subscription is late.");
             /* If the retransmission queue is enabled a retransmission message is allocated */
             if(retransmission)
                 UA_free(retransmission);
-            UA_Subscription_isLate(sub);
+            sub->late = true;
             UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
             return;
         }
@@ -538,14 +550,10 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
 
     /* <-- The point of no return --> */
 
-    /* Notifications remaining? */
-    UA_Boolean moreNotifications = (sub->notificationQueueSize > 0);
-
     /* Set up the response */
-    response->responseHeader.timestamp = UA_DateTime_now();
     response->subscriptionId = sub->subscriptionId;
-    response->moreNotifications = moreNotifications;
-    message->publishTime = response->responseHeader.timestamp;
+    response->moreNotifications = (sub->notificationQueueSize > 0);
+    message->publishTime = UA_DateTime_now();
 
     /* Set sequence number to message. Started at 1 which is given during
      * creating a new subscription. The 1 is required for initial publish
@@ -582,20 +590,30 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     UA_assert(i == sub->retransmissionQueueSize);
 
     /* Send the response */
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+    UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub,
                               "Sending out a publish response with %" PRIu32
                               " notifications", notifications);
     sendResponse(server, sub->session, sub->session->header.channel, pre->requestId,
                  (UA_Response*)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
 
-    /* Reset subscription state to normal */
-    sub->state = UA_SUBSCRIPTIONSTATE_NORMAL;
+    /* Reset the Subscription state to NORMAL. But only if all notifications
+     * have been sent out. Otherwise keep the Subscription in the LATE state. So
+     * we immediately answer incoming Publish requests.
+     *
+     * (We also check that session->responseQueueSize > 0 in Service_Publish. To
+     * avoid answering Publish requests out of order. As we additionally may have
+     * scheduled a publish callback as a delayed callback. */
+    if(sub->notificationQueueSize == 0)
+        sub->late = false;
+
+    /* Reset the KeepAlive after publishing */
     sub->currentKeepAliveCount = 0;
 
     /* Free the response */
-    if(retransmission)
+    if(retransmission) {
         /* NotificationMessage was moved into retransmission queue */
         UA_NotificationMessage_init(&response->notificationMessage);
+    }
     response->availableSequenceNumbers = NULL;
     response->availableSequenceNumbersSize = 0;
     UA_PublishResponse_clear(&pre->response);
@@ -613,82 +631,130 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     sub->notificationsCount += (sentDCN + sentEN);
 #endif
 
-    /* Repeat sending responses if there are more notifications to send */
-    if(moreNotifications)
-        UA_Subscription_publish(server, sub);
-}
+    /* Repeat sending notifications if there are more notifications to send. But
+     * only call monitoredItem_sampleCallback in the regular publish
+     * callback. */
+    UA_Boolean done = (sub->notificationQueueSize == 0);
+    if(!done && !sub->delayedCallbackRegistered) {
+        sub->delayedCallbackRegistered = true;
 
-UA_Boolean
-UA_Session_reachedPublishReqLimit(UA_Server *server, UA_Session *session) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, session,
-                         "Reached number of publish request limit");
+        sub->delayedMoreNotifications.callback = (UA_Callback)delayedPublishNotifications;
+        sub->delayedMoreNotifications.application = server;
+        sub->delayedMoreNotifications.context = sub;
 
-    /* Dequeue a response */
-    UA_PublishResponseEntry *pre = UA_Session_dequeuePublishReq(session);
-
-    /* Cannot publish without a response */
-    if(!pre) {
-        UA_LOG_FATAL_SESSION(&server->config.logger, session,
-                             "No publish requests available");
-        return false;
+        UA_EventLoop *el = server->config.eventLoop;
+        el->addDelayedCallback(el, &sub->delayedMoreNotifications);
     }
-
-    /* <-- The point of no return --> */
-
-    UA_PublishResponse *response = &pre->response;
-    UA_NotificationMessage *message = &response->notificationMessage;
-
-    /* Set up the response. Note that this response has no related subscription id */
-    response->responseHeader.timestamp = UA_DateTime_now();
-    response->responseHeader.serviceResult = UA_STATUSCODE_BADTOOMANYPUBLISHREQUESTS;
-    response->subscriptionId = 0;
-    response->moreNotifications = false;
-    message->publishTime = response->responseHeader.timestamp;
-    message->sequenceNumber = 0;
-    response->availableSequenceNumbersSize = 0;
-
-    /* Send the response */
-    UA_LOG_DEBUG_SESSION(&server->config.logger, session,
-                         "Sending out a publish response triggered by too many publish requests");
-    sendResponse(server, session, session->header.channel, pre->requestId,
-                 (UA_Response*)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
-
-    /* Free the response */
-    UA_Array_delete(response->results, response->resultsSize, &UA_TYPES[UA_TYPES_UINT32]);
-    UA_free(pre); /* no need for UA_PublishResponse_clear */
-
-    return true;
-}
-
-UA_StatusCode
-Subscription_registerPublishCallback(UA_Server *server, UA_Subscription *sub) {
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
-                              "Register subscription publishing callback");
-    UA_LOCK_ASSERT(&server->serviceMutex, 1);
-
-    if(sub->publishCallbackId > 0)
-        return UA_STATUSCODE_GOOD;
-
-    UA_StatusCode retval =
-        addRepeatedCallback(server, (UA_ServerCallback)publishCallback,
-                            sub, sub->publishingInterval, &sub->publishCallbackId);
-    if(retval != UA_STATUSCODE_GOOD)
-        return retval;
-
-    UA_assert(sub->publishCallbackId > 0);
-    return UA_STATUSCODE_GOOD;
 }
 
 void
-Subscription_unregisterPublishCallback(UA_Server *server, UA_Subscription *sub) {
-    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
-                              "Unregister subscription publishing callback");
+UA_Subscription_resendData(UA_Server *server, UA_Subscription *sub) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_assert(server);
+    UA_assert(sub);
 
-    if(sub->publishCallbackId == 0)
+    /* Part 4, §6.7: If this Method is called, subsequent Publish responses
+     * shall contain the current values of all data MonitoredItems in the
+     * Subscription where the MonitoringMode is set to Reporting. If a value is
+     * queued for a data MonitoredItem, the next value in the queue is sent in
+     * the Publish response. If no value is queued for a data MonitoredItem, the
+     * last value sent is repeated in the Publish response. */
+    UA_MonitoredItem *mon;
+    LIST_FOREACH(mon, &sub->monitoredItems, listEntry) {
+        /* Create only DataChange notifications */
+        if(mon->itemToMonitor.attributeId == UA_ATTRIBUTEID_EVENTNOTIFIER)
+            continue;
+
+        /* Only if the mode is monitoring */
+        if(mon->monitoringMode != UA_MONITORINGMODE_REPORTING)
+            continue;
+
+        /* If a value is queued for a data MonitoredItem, the next value in
+         * the queue is sent in the Publish response. */
+        if(mon->queueSize > 0)
+            continue;
+
+        /* Create a notification with the last sampled value */
+        UA_MonitoredItem_createDataChangeNotification(server, mon, &mon->lastValue);
+    }
+}
+
+void
+UA_Session_ensurePublishQueueSpace(UA_Server* server, UA_Session* session) {
+    if(server->config.maxPublishReqPerSession == 0)
         return;
 
-    removeCallback(server, sub->publishCallbackId);
-    sub->publishCallbackId = 0;
+    while(session->responseQueueSize >= server->config.maxPublishReqPerSession) {
+        /* Dequeue a response */
+        UA_PublishResponseEntry *pre = UA_Session_dequeuePublishReq(session);
+        UA_assert(pre != NULL); /* There must be a pre as session->responseQueueSize > 0 */
+
+        UA_LOG_DEBUG_SESSION(server->config.logging, session,
+                             "Sending out a publish response triggered by too many publish requests");
+
+        /* Send the response. This response has no related subscription id */
+        UA_PublishResponse *response = &pre->response;
+        response->responseHeader.serviceResult = UA_STATUSCODE_BADTOOMANYPUBLISHREQUESTS;
+        sendResponse(server, session, session->header.channel, pre->requestId,
+                     (UA_Response *)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
+
+        /* Free the response */
+        UA_PublishResponse_clear(response);
+        UA_free(pre);
+    }
+}
+
+static void
+sampleAndPublishCallback(UA_Server *server, UA_Subscription *sub) {
+    UA_LOCK(&server->serviceMutex);
+    UA_assert(sub);
+
+    UA_LOG_DEBUG_SUBSCRIPTION(server->config.logging, sub,
+                              "Sample and Publish Callback");
+
+    /* Sample the MonitoredItems with sampling interval <0 (which implies
+     * sampling in the same interval as the subscription) */
+    UA_MonitoredItem *mon;
+    LIST_FOREACH(mon, &sub->samplingMonitoredItems, sampling.subscriptionSampling) {
+        monitoredItem_sampleCallback(server, mon);
+    }
+
+    /* Publish the queued notifications */
+    UA_Subscription_publish(server, sub);
+
+    UA_UNLOCK(&server->serviceMutex);
+}
+
+UA_StatusCode
+Subscription_setState(UA_Server *server, UA_Subscription *sub,
+                      UA_SubscriptionState state) {
+    if(state <= UA_SUBSCRIPTIONSTATE_REMOVING) {
+        if(sub->publishCallbackId != 0) {
+            removeCallback(server, sub->publishCallbackId);
+            sub->publishCallbackId = 0;
+#ifdef UA_ENABLE_DIAGNOSTICS
+            sub->disableCount++;
+#endif
+        }
+    } else if(sub->publishCallbackId == 0) {
+        UA_StatusCode res =
+            addRepeatedCallback(server, (UA_ServerCallback)sampleAndPublishCallback,
+                                sub, sub->publishingInterval, &sub->publishCallbackId);
+        if(res != UA_STATUSCODE_GOOD) {
+            sub->state = UA_SUBSCRIPTIONSTATE_STOPPED;
+            return res;
+        }
+
+        /* Send (at least a) keepalive after the next publish interval */
+        sub->currentKeepAliveCount = sub->maxKeepAliveCount;
+
+#ifdef UA_ENABLE_DIAGNOSTICS
+        sub->enableCount++;
+#endif
+    }
+
+    sub->state = state;
+    return UA_STATUSCODE_GOOD;
 }
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS */

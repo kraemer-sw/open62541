@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 ### This Source Code Form is subject to the terms of the Mozilla Public
@@ -227,16 +227,16 @@ class NodeSet(object):
             if r.target == node.id:
                 if r.source not in self.nodes:
                     continue
-                self.nodes[r.source].references = set(filter(
-                    lambda rt: filterRef(r, rt),
-                    self.nodes[r.source].references
+                self.nodes[r.source].references = dict(filter(
+                    lambda rt: filterRef(r, rt[0]), # filter only on key of each dict item
+                    self.nodes[r.source].references.items()
                 ))
             elif r.source == node.id:
                 if r.target not in self.nodes:
                     continue
-                self.nodes[r.target].references = set(filter(
-                    lambda rt: filterRef(r, rt),
-                    self.nodes[r.target].references
+                self.nodes[r.target].references = dict(filter(
+                    lambda rt: filterRef(r, rt[0]), # filter only on key of each dict item
+                    self.nodes[r.target].references.items()
                 ))
         del self.nodes[node.id]
 
@@ -382,7 +382,7 @@ class NodeSet(object):
         for u in self.nodes.values():
             for ref in u.references.copy():
                 back = Reference(ref.target, ref.referenceType, ref.source, not ref.isForward)
-                self.nodes[ref.target].references.add(back) # ref set does not make a duplicate entry
+                self.nodes[ref.target].references[back] = None # dict key does not make a duplicate entry
 
     def setNodeParent(self):
         parentreftypes = getSubTypesOf(self, self.getNodeByBrowseName("HierarchicalReferences"))
@@ -471,6 +471,7 @@ class NodeSet(object):
         opaque_map = []
         selected_types = []
         type_csv = []
+        type_xml = []
         no_builtin = True
         outname = "outname"
 
@@ -478,7 +479,7 @@ class NodeSet(object):
             type_bsd.append(bsd)
 
         self.parser = CSVBSDTypeParser(opaque_map, selected_types, no_builtin, outname, import_bsd,
-                                    type_bsd, type_csv, self.namespaces)
+                                    type_bsd, type_csv, type_xml, self.namespaces)
         self.parser.create_types()
 
         nodeset_base.close()

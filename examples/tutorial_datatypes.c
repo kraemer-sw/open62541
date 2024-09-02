@@ -21,6 +21,7 @@
 #include <open62541/server_config_default.h>
 
 #include <stdlib.h>
+#include <stdio.h>
 
 static void
 variables_basic(void) {
@@ -130,7 +131,7 @@ variables_variants(void) {
     UA_Variant_clear(&v3);
 }
 
-#ifdef UA_ENABLE_TYPEDESCRIPTION
+#ifdef UA_ENABLE_JSON_ENCODING
 static void
 prettyprint(void) {
     UA_ReadRequest rr;
@@ -183,7 +184,7 @@ int main(void) {
     variables_basic();
     variables_nodeids();
     variables_variants();
-#ifdef UA_ENABLE_TYPEDESCRIPTION
+#ifdef UA_ENABLE_JSON_ENCODING
     prettyprint();
 #endif
 

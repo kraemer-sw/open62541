@@ -42,13 +42,9 @@
 
 #include <open62541/plugin/log_stdout.h>
 #include <open62541/server.h>
-#include <open62541/server_config_default.h>
+#include <open62541/plugin/securitypolicy_default.h>
 
-#include "ua_pubsub.h"
-
-#include <signal.h>
-
-#include <open62541/plugin/pubsub_mqtt.h>
+#include <stdio.h>
 
 #define CONNECTION_NAME              "MQTT Publisher Connection"
 #define TRANSPORT_PROFILE_URI        "http://opcfoundation.org/UA-Profile/Transport/pubsub-mqtt"
@@ -64,6 +60,7 @@
 // #define EXAMPLE_USE_MQTT_LOGIN
 
 #ifdef EXAMPLE_USE_MQTT_LOGIN
+#define LOGIN_OPTION_COUNT           2
 #define USERNAME_OPTION_NAME         "mqttUsername"
 #define PASSWORD_OPTION_NAME         "mqttPassword"
 #define MQTT_USERNAME                "open62541user"
@@ -74,9 +71,20 @@
 //#define EXAMPLE_USE_MQTT_TLS
 
 #ifdef EXAMPLE_USE_MQTT_TLS
+#define TLS_OPTION_COUNT                2
 #define USE_TLS_OPTION_NAME             "mqttUseTLS"
 #define MQTT_CA_FILE_PATH_OPTION_NAME   "mqttCaFilePath"
 #define CA_FILE_PATH                    "/path/to/server.cert"
+#endif
+
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION) && !defined(UA_ENABLE_JSON_ENCODING)
+#define UA_AES128CTR_SIGNING_KEY_LENGTH 32
+#define UA_AES128CTR_KEY_LENGTH 16
+#define UA_AES128CTR_KEYNONCE_LENGTH 4
+
+UA_Byte signingKey[UA_AES128CTR_SIGNING_KEY_LENGTH] = {0};
+UA_Byte encryptingKey[UA_AES128CTR_KEY_LENGTH] = {0};
+UA_Byte keyNonce[UA_AES128CTR_KEYNONCE_LENGTH] = {0};
 #endif
 
 #ifdef UA_ENABLE_JSON_ENCODING
@@ -105,47 +113,45 @@ addPubSubConnection(UA_Server *server, char *addressUrl) {
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     /* Changed to static publisherId from random generation to identify
      * the publisher on Subscriber side */
-    connectionConfig.publisherId.numeric = 2234;
+    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT16;
+    connectionConfig.publisherId.uint16 = 2234;
 
     /* configure options, set mqtt client id */
-    const int connectionOptionsCount = 1
-#ifdef EXAMPLE_USE_MQTT_LOGIN
-    + 2
-#endif
-#ifdef EXAMPLE_USE_MQTT_TLS
-    + 2
-#endif
-    ;
+/* #ifdef EXAMPLE_USE_MQTT_LOGIN */
+/*     + LOGIN_OPTION_COUNT */
+/* #endif */
+/* #ifdef EXAMPLE_USE_MQTT_TLS */
+/*     + TLS_OPTION_COUNT */
+/* #endif */
 
-    UA_KeyValuePair connectionOptions[connectionOptionsCount];
+    UA_KeyValuePair connectionOptions[1];
 
-    size_t connectionOptionIndex = 0;
-    connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, CONNECTIONOPTION_NAME);
     UA_String mqttClientId = UA_STRING(MQTT_CLIENT_ID);
-    UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttClientId, &UA_TYPES[UA_TYPES_STRING]);
+    connectionOptions[0].key = UA_QUALIFIEDNAME(0, CONNECTIONOPTION_NAME);
+    UA_Variant_setScalar(&connectionOptions[0].value, &mqttClientId, &UA_TYPES[UA_TYPES_STRING]);
 
-#ifdef EXAMPLE_USE_MQTT_LOGIN
-    connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, USERNAME_OPTION_NAME);
-    UA_String mqttUsername = UA_STRING(MQTT_USERNAME);
-    UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttUsername, &UA_TYPES[UA_TYPES_STRING]);
+/* #ifdef EXAMPLE_USE_MQTT_LOGIN */
+/*     connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, USERNAME_OPTION_NAME); */
+/*     UA_String mqttUsername = UA_STRING(MQTT_USERNAME); */
+/*     UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttUsername, &UA_TYPES[UA_TYPES_STRING]); */
 
-    connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, PASSWORD_OPTION_NAME);
-    UA_String mqttPassword = UA_STRING(MQTT_PASSWORD);
-    UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttPassword, &UA_TYPES[UA_TYPES_STRING]);
-#endif
+/*     connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, PASSWORD_OPTION_NAME); */
+/*     UA_String mqttPassword = UA_STRING(MQTT_PASSWORD); */
+/*     UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttPassword, &UA_TYPES[UA_TYPES_STRING]); */
+/* #endif */
 
-#ifdef EXAMPLE_USE_MQTT_TLS
-    connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, USE_TLS_OPTION_NAME);
-    UA_Boolean mqttUseTLS = true;
-    UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttUseTLS, &UA_TYPES[UA_TYPES_BOOLEAN]);
+/* #ifdef EXAMPLE_USE_MQTT_TLS */
+/*     connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, USE_TLS_OPTION_NAME); */
+/*     UA_Boolean mqttUseTLS = true; */
+/*     UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttUseTLS, &UA_TYPES[UA_TYPES_BOOLEAN]); */
 
-    connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, MQTT_CA_FILE_PATH_OPTION_NAME);
-    UA_String mqttCaFile = UA_STRING(CA_FILE_PATH);
-    UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttCaFile, &UA_TYPES[UA_TYPES_STRING]);
-#endif
+/*     connectionOptions[connectionOptionIndex].key = UA_QUALIFIEDNAME(0, MQTT_CA_FILE_PATH_OPTION_NAME); */
+/*     UA_String mqttCaFile = UA_STRING(CA_FILE_PATH); */
+/*     UA_Variant_setScalar(&connectionOptions[connectionOptionIndex++].value, &mqttCaFile, &UA_TYPES[UA_TYPES_STRING]); */
+/* #endif */
 
-    connectionConfig.connectionProperties = connectionOptions;
-    connectionConfig.connectionPropertiesSize = connectionOptionIndex;
+    connectionConfig.connectionProperties.map = connectionOptions;
+    connectionConfig.connectionProperties.mapSize = 1;
 
     UA_Server_addPubSubConnection(server, &connectionConfig, &connectionIdent);
 }
@@ -208,7 +214,7 @@ addWriterGroup(UA_Server *server, char *topic, int interval) {
     /* decide whether to use JSON or UADP encoding*/
 #ifdef UA_ENABLE_JSON_ENCODING
     UA_JsonWriterGroupMessageDataType *Json_writerGroupMessage;
-    
+
     if(useJson) {
         writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_JSON;
         writerGroupConfig.messageSettings.encoding             = UA_EXTENSIONOBJECT_DECODED;
@@ -253,6 +259,12 @@ addWriterGroup(UA_Server *server, char *topic, int interval) {
         writerGroupConfig.messageSettings.content.decoded.data = writerGroupMessage;
     }
 
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION) && !defined(UA_ENABLE_JSON_ENCODING)
+    /* Encryption settings */
+    UA_ServerConfig *config = UA_Server_getConfig(server);
+    writerGroupConfig.securityMode = UA_MESSAGESECURITYMODE_SIGNANDENCRYPT;
+    writerGroupConfig.securityPolicy = &config->pubSubConfig.securityPolicies[0];
+#endif
 
     /* configure the mqtt publish topic */
     UA_BrokerWriterGroupTransportDataType brokerTransportSettings;
@@ -288,6 +300,19 @@ addWriterGroup(UA_Server *server, char *topic, int interval) {
     if (!useJson && writerGroupMessage) {
         UA_UadpWriterGroupMessageDataType_delete(writerGroupMessage);
     }
+
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION) && !defined(UA_ENABLE_JSON_ENCODING)
+    /* Add the encryption key informaton */
+    UA_ByteString sk = {UA_AES128CTR_SIGNING_KEY_LENGTH, signingKey};
+    UA_ByteString ek = {UA_AES128CTR_KEY_LENGTH, encryptingKey};
+    UA_ByteString kn = {UA_AES128CTR_KEYNONCE_LENGTH, keyNonce};
+    retval = UA_Server_setWriterGroupEncryptionKeys(server, writerGroupIdent, 1, sk, ek, kn);
+    if (retval!= UA_STATUSCODE_GOOD)
+    {
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,"SV_PubSub.c : addWriterGroup : UA_Server_setWriterGroupEncryptionKeys : "
+                                                            "failure %s", UA_StatusCode_name(retval));
+    }
+#endif
 
     return retval;
 }
@@ -372,11 +397,6 @@ addDataSetWriter(UA_Server *server, char *topic) {
  * which already contains the decoding code for UADP messages.
  *
  * It follows the main server code, making use of the above definitions. */
-UA_Boolean running = true;
-static void stopHandler(int sign) {
-    UA_LOG_INFO(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "received ctrl-c");
-    running = false;
-}
 
 static void usage(void) {
     printf("Usage: tutorial_pubsub_mqtt_publish [--url <opc.mqtt://hostname:port>] "
@@ -391,9 +411,6 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
-    signal(SIGINT, stopHandler);
-    signal(SIGTERM, stopHandler);
-
     /* TODO: Change to secure mqtt port:8883 */
     char *addressUrl = BROKER_ADDRESS_URL;
     char *topic = PUBLISHER_TOPIC;
@@ -436,6 +453,7 @@ int main(int argc, char **argv) {
                 usage();
                 return -1;
             }
+            argpos++;
             if(sscanf(argv[argpos], "%d", &interval) != 1) {
                 usage();
                 return -1;
@@ -452,35 +470,31 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    /* Set up the server config */
     UA_Server *server = UA_Server_new();
+
+#if defined(UA_ENABLE_PUBSUB_ENCRYPTION)
+    /* Instantiate the PubSub SecurityPolicy */
     UA_ServerConfig *config = UA_Server_getConfig(server);
-    /* Details about the connection configuration and handling are located in
-     * the pubsub connection tutorial */
-    UA_ServerConfig_setDefault(config);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerMQTT());
+    config->pubSubConfig.securityPolicies = (UA_PubSubSecurityPolicy*)
+        UA_malloc(sizeof(UA_PubSubSecurityPolicy));
+    config->pubSubConfig.securityPoliciesSize = 1;
+    UA_PubSubSecurityPolicy_Aes128Ctr(config->pubSubConfig.securityPolicies,
+                                      config->logging);
+#endif
 
     addPubSubConnection(server, addressUrl);
     addPublishedDataSet(server);
     addDataSetField(server);
-    retval = addWriterGroup(server, topic, interval);
-    if (UA_STATUSCODE_GOOD != retval)
-    {
-        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER, "Error Name = %s", UA_StatusCode_name(retval));
-        return EXIT_FAILURE;
+    UA_StatusCode retval = addWriterGroup(server, topic, interval);
+    if(UA_STATUSCODE_GOOD != retval) {
+        UA_LOG_ERROR(UA_Log_Stdout, UA_LOGCATEGORY_SERVER,
+                     "Error Name = %s", UA_StatusCode_name(retval));
+        UA_Server_delete(server);
+        return EXIT_SUCCESS;
     }
     addDataSetWriter(server, topic);
-    UA_PubSubConnection *connection = UA_PubSubConnection_findConnectionbyId(server, connectionIdent);
 
-    if(!connection) {
-        UA_LOG_WARNING(UA_Log_Stdout, UA_LOGCATEGORY_USERLAND,
-                       "Could not create a PubSubConnection");
-        UA_Server_delete(server);
-        return -1;
-    }
-
-    UA_Server_run(server, &running);
+    UA_Server_runUntilInterrupt(server);
     UA_Server_delete(server);
     return 0;
 }

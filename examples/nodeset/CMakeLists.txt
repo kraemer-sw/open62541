@@ -20,7 +20,7 @@ if(NOT CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     ua_generate_nodeset_and_datatypes(
         NAME "example"
         FILE_NS "${FILE_NS_DIRPREFIX}/server_nodeset.xml"
-        DEPENDS "${CMAKE_SOURCE_DIR}/tools/schema/Opc.Ua.NodeSet2.Reduced.xml"
+        DEPENDS "${CMAKE_CURRENT_LIST_DIR}/../../tools/schema/Opc.Ua.NodeSet2.Reduced.xml"
     )
 else()
     # standalone examples build expects already installed Opc.Ua.NodeSet2.Reduced.xml
@@ -41,13 +41,13 @@ ua_generate_nodeid_header(
 add_example(server_nodeset server_nodeset.c
             ${UA_NODESET_EXAMPLE_SOURCES}
             ${PROJECT_BINARY_DIR}/src_generated/open62541/example_nodeids.h)
+add_dependencies(server_nodeset open62541-generator-ns-example open62541-generator-ids_example)
 
 if(UA_NAMESPACE_ZERO STREQUAL "FULL")
     ua_generate_nodeset_and_datatypes(
         NAME "testnodeset"
         FILE_CSV "${FILE_CSV_DIRPREFIX}/testnodeset.csv"
         FILE_BSD "${FILE_BSD_DIRPREFIX}/testtypes.bsd"
-        NAMESPACE_MAP "2:http://yourorganisation.org/test/"
         FILE_NS "${FILE_NS_DIRPREFIX}/testnodeset.xml"
         INTERNAL
     )
@@ -63,10 +63,10 @@ endif()
 ###################
 
 if(NOT CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
-    set(FILE_CSV_DIRPREFIX ${open62541_NODESET_DIR})
-    set(FILE_BSD_PLCOPEN_DIRPREFIX ${open62541_NODESET_DIR})
+    set(FILE_CSV_DIRPREFIX ${UA_NODESET_DIR})
+    set(FILE_BSD_PLCOPEN_DIRPREFIX ${UA_NODESET_DIR})
     set(FILE_BSD_POWERLINK_DIRPREFIX ${PROJECT_SOURCE_DIR}/nodeset)
-    set(FILE_NS_DIRPREFIX ${open62541_NODESET_DIR})
+    set(FILE_NS_DIRPREFIX ${UA_NODESET_DIR})
 else()
     set(FILE_CSV_DIRPREFIX ${UA_NODESET_DIR})
     set(FILE_BSD_PLCOPEN_DIRPREFIX ${UA_NODESET_DIR})
@@ -80,9 +80,8 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
     # Generate types and namespace for DI
     ua_generate_nodeset_and_datatypes(
         NAME "di"
-        FILE_CSV "${FILE_CSV_DIRPREFIX}/DI/OpcUaDiModel.csv"
+        FILE_CSV "${FILE_CSV_DIRPREFIX}/DI/Opc.Ua.Di.NodeIds.csv"
         FILE_BSD "${FILE_BSD_PLCOPEN_DIRPREFIX}/DI/Opc.Ua.Di.Types.bsd"
-        NAMESPACE_MAP "2:http://opcfoundation.org/UA/DI/"
         FILE_NS "${FILE_NS_DIRPREFIX}/DI/Opc.Ua.Di.NodeSet2.xml"
         INTERNAL
     )
@@ -110,7 +109,6 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
         NAME "powerlink"
         FILE_CSV "${FILE_CSV_DIRPREFIX}/POWERLINK/Opc.Ua.POWERLINK.NodeIds.csv"
         FILE_BSD "${FILE_BSD_POWERLINK_DIRPREFIX}/Opc.Ua.POWERLINK.NodeSet2.bsd"
-        NAMESPACE_MAP "3:http://opcfoundation.org/UA/POWERLINK/"
         FILE_NS "${FILE_NS_DIRPREFIX}/POWERLINK/Opc.Ua.POWERLINK.NodeSet2.xml"
         # POWERLINK depends on the di nodeset, which must be generated before
         DEPENDS "di"
@@ -123,6 +121,10 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
                 ${UA_TYPES_DI_SOURCES}
                 ${UA_TYPES_POWERLINK_SOURCES})
     add_dependencies(server_nodeset_powerlink open62541-generator-ns-powerlink)
-    
+endif()
 
+if(UA_ENABLE_NODESET_INJECTOR)
+    set(UA_NODESETINJECTOR_GENERATORS ${UA_NODESETINJECTOR_GENERATORS} PARENT_SCOPE)
+    set(UA_NODESETINJECTOR_SOURCE_FILES ${UA_NODESETINJECTOR_SOURCE_FILES} PARENT_SCOPE)
+    set(UA_NODESETINJECTOR_EXAMPLE_NAMES ${UA_NODESETINJECTOR_EXAMPLE_NAMES} PARENT_SCOPE)
 endif()

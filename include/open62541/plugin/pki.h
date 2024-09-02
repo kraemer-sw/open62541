@@ -10,6 +10,7 @@
 
 #include <open62541/types.h>
 #include <open62541/types_generated.h>
+#include <open62541/plugin/log.h>
 
 _UA_BEGIN_DECLS
 
@@ -36,17 +37,40 @@ struct UA_CertificateVerification {
     void *context;
 
     /* Verify the certificate against the configured policies and trust chain. */
-    UA_StatusCode (*verifyCertificate)(void *verificationContext,
+    UA_StatusCode (*verifyCertificate)(const UA_CertificateVerification *cv,
                                        const UA_ByteString *certificate);
 
     /* Verify that the certificate has the applicationURI in the subject name. */
-    UA_StatusCode (*verifyApplicationURI)(void *verificationContext,
+    UA_StatusCode (*verifyApplicationURI)(const UA_CertificateVerification *cv,
                                           const UA_ByteString *certificate,
                                           const UA_String *applicationURI);
 
+    /* Get the expire date from certificate */
+    UA_StatusCode (*getExpirationDate)(UA_DateTime *expiryDateTime, 
+                                       UA_ByteString *certificate);
+
+    UA_StatusCode (*getSubjectName)(UA_String *subjectName,
+                                    UA_ByteString *certificate);
+
     /* Delete the certificate verification context */
     void (*clear)(UA_CertificateVerification *cv);
+
+    /* Pointer to logging pointer in the server/client configuration. If the
+     * logging pointer is changed outside of the plugin, the new logger is used
+     * automatically*/
+    const UA_Logger *logging;
 };
+
+/* Decrypt a private key in PEM format using a password. The output is the key
+ * in the binary DER format. Also succeeds if the PEM private key does not
+ * require a password or is already in the DER format. The outDerKey memory is
+ * allocated internally.
+ *
+ * Returns UA_STATUSCODE_BADSECURITYCHECKSFAILED if the password is wrong. */
+UA_EXPORT UA_StatusCode
+UA_PKI_decryptPrivateKey(const UA_ByteString privateKey,
+                         const UA_ByteString password,
+                         UA_ByteString *outDerKey);
 
 _UA_END_DECLS
 

@@ -3,6 +3,17 @@
 
 #include <open62541/types.h>
 #include <open62541/types_generated_handling.h>
+#include <stdio.h>
+#include <errno.h>
+
+/* sleep_ms */
+#ifdef _WIN32
+# include <synchapi.h>
+# define sleep_ms(ms) Sleep(ms)
+#else
+# include <unistd.h>
+# define sleep_ms(ms) usleep(ms * 1000)
+#endif
 
 /* loadFile parses the certificate file.
  *
@@ -41,7 +52,7 @@ writeFile(const char* const path, const UA_ByteString buffer) {
     FILE *fp = NULL;
 
     fp = fopen(path, "wb");
-    if(fp == NULL) 
+    if(fp == NULL)
         return UA_STATUSCODE_BADINTERNALERROR;
 
     for(UA_UInt32 bufIndex = 0; bufIndex < buffer.length; bufIndex++) {

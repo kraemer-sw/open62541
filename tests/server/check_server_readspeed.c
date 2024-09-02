@@ -12,7 +12,9 @@
 #include "ua_types_encoding_binary.h"
 
 #include <check.h>
+#include <stdlib.h>
 #include <time.h>
+#include <stdio.h>
 
 #include "testing_networklayers.h"
 #include "testing_policy.h"
@@ -24,10 +26,8 @@ static UA_Server *server;
 static UA_NodeId readNodeIds[READNODES];
 
 static void setup(void) {
-    UA_ServerConfig config;
-    memset(&config, 0, sizeof(UA_ServerConfig));
-    UA_Nodestore_HashMap(&config.nodestore);
-    server = UA_Server_newWithConfig(&config);
+    server = UA_Server_new();
+    ck_assert(server != NULL);
 }
 
 static void teardown(void) {
@@ -36,7 +36,7 @@ static void teardown(void) {
 
 START_TEST(readSpeed) {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    
+
     /* Add variable nodes to the address space */
     UA_VariableAttributes attr = UA_VariableAttributes_default;
     UA_Int32 myInteger = 42;
@@ -45,7 +45,7 @@ START_TEST(readSpeed) {
     UA_NodeId parentReferenceNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES);
     for(size_t i = 0; i < READNODES; i++) {
         char varName[20];
-        UA_snprintf(varName, 20, "Variable %u", (UA_UInt32)i);
+        snprintf(varName, 20, "Variable %u", (UA_UInt32)i);
         UA_NodeId myNodeId = UA_NODEID_STRING(1, varName);
         UA_QualifiedName myName = UA_QUALIFIEDNAME(1, varName);
         retval = UA_Server_addVariableNode(server, myNodeId, parentNodeId,
@@ -73,7 +73,7 @@ START_TEST(readSpeed) {
 
     UA_ReadResponse res;
     UA_ReadResponse_init(&res);
-    
+
     clock_t begin, finish;
     begin = clock();
 
@@ -105,7 +105,7 @@ END_TEST
 
 START_TEST(readSpeedWithEncoding) {
     UA_StatusCode retval = UA_STATUSCODE_GOOD;
-    
+
     /* Add variable nodes to the address space */
     UA_VariableAttributes attr = UA_VariableAttributes_default;
     UA_Int32 myInteger = 42;
@@ -114,7 +114,7 @@ START_TEST(readSpeedWithEncoding) {
     UA_NodeId parentReferenceNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES);
     for(size_t i = 0; i < READNODES; i++) {
         char varName[20];
-        UA_snprintf(varName, 20, "Variable %u", (UA_UInt32)i);
+        snprintf(varName, 20, "Variable %u", (UA_UInt32)i);
         UA_NodeId myNodeId = UA_NODEID_STRING(1, varName);
         UA_QualifiedName myName = UA_QUALIFIEDNAME(1, varName);
         retval = UA_Server_addVariableNode(server, myNodeId, parentNodeId,

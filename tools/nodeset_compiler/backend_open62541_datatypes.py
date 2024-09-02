@@ -86,6 +86,8 @@ def generateQualifiedNameCode(value, alloc=False,):
                                                      str(value.ns), splitStringLiterals(vn))
 
 def generateGuidCode(value):
+    if isinstance(value, str):
+        return "UA_GUID(\"{}\")".format(value)
     if not value or len(value) != 5:
         return "UA_GUID_NULL"
     else:
@@ -99,7 +101,9 @@ def generateNodeIdCode(value):
     elif value.s != None:
         v = makeCLiteral(value.s)
         return u"UA_NODEID_STRING(ns[%s], \"%s\")" % (value.ns, v)
-    raise Exception(str(value) + " no NodeID generation for bytestring and guid..")
+    elif value.g != None:
+        return u"UA_NODEID_GUID(ns[%s], %s)" % (value.ns, generateGuidCode(value.gAsString()))
+    raise Exception(str(value) + " NodeID generation for bytestring NodeIDs not supported")
 
 def generateExpandedNodeIdCode(value):
     if value.i != None:
@@ -127,7 +131,7 @@ def generateNodeValueCode(prepend , node, instanceName, valueName, global_var_co
                 node.value = 0.0
             else: 
                 node.value = 0
-        if encRule is None or isinstance(encRule.member_type, EnumerationType):
+        if encRule is None:
             return prepend + " = (UA_" + node.__class__.__name__ + ") " + str(node.value) + ";"
         else:
             return prepend + " = (UA_" + encRule.member_type.name + ") " + str(node.value) + ";"

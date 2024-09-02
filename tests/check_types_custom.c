@@ -7,7 +7,8 @@
 
 #include "ua_types_encoding_binary.h"
 
-#include "check.h"
+#include <stdlib.h>
+#include <check.h>
 #include <math.h>
 
 #ifdef __clang__
@@ -79,7 +80,7 @@ static const UA_DataType PointType = {
     members
 };
 
-const UA_DataTypeArray customDataTypes = {NULL, 1, &PointType};
+const UA_DataTypeArray customDataTypes = {NULL, 1, &PointType, UA_FALSE};
 
 typedef struct {
     UA_Int16 a;
@@ -138,7 +139,7 @@ static const UA_DataType OptType = {
         Opt_members
 };
 
-const UA_DataTypeArray customDataTypesOptStruct = {&customDataTypes, 2, &OptType};
+const UA_DataTypeArray customDataTypesOptStruct = {&customDataTypes, 2, &OptType, UA_FALSE};
 
 typedef struct {
     UA_String description;
@@ -196,7 +197,7 @@ static const UA_DataType ArrayOptType = {
     ArrayOptStruct_members
 };
 
-const UA_DataTypeArray customDataTypesOptArrayStruct = {&customDataTypesOptStruct, 3, &ArrayOptType};
+const UA_DataTypeArray customDataTypesOptArrayStruct = {&customDataTypesOptStruct, 3, &ArrayOptType, UA_FALSE};
 
 typedef enum {UA_UNISWITCH_NONE = 0, UA_UNISWITCH_OPTIONA = 1, UA_UNISWITCH_OPTIONB = 2} UA_UniSwitch;
 
@@ -237,7 +238,7 @@ static const UA_DataType UniType = {
         Uni_members
 };
 
-const UA_DataTypeArray customDataTypesUnion = {&customDataTypesOptArrayStruct, 2, &UniType};
+const UA_DataTypeArray customDataTypesUnion = {&customDataTypesOptArrayStruct, 2, &UniType, UA_FALSE};
 
 typedef enum {
     UA_SELFCONTAININGUNIONSWITCH_NONE = 0,
@@ -288,7 +289,7 @@ const UA_DataType selfContainingUnionType = {
     SelfContainingUnion_members  /* .members */
 };
 
-const UA_DataTypeArray customDataTypesSelfContainingUnion = {NULL, 1, &selfContainingUnionType};
+const UA_DataTypeArray customDataTypesSelfContainingUnion = {NULL, 1, &selfContainingUnionType, UA_FALSE};
 
 START_TEST(parseCustomScalar) {
     Point p;
@@ -390,14 +391,11 @@ START_TEST(parseCustomArray) {
     size_t offset = 0;
     retval = UA_decodeBinaryInternal(&buf, &offset, &var2, &UA_TYPES[UA_TYPES_VARIANT], &customDataTypes);
     ck_assert_int_eq(retval, UA_STATUSCODE_GOOD);
-    ck_assert(var2.type == &UA_TYPES[UA_TYPES_EXTENSIONOBJECT]);
+    ck_assert(var2.type == &PointType);
     ck_assert_uint_eq(var2.arrayLength, 10);
 
     for (size_t i = 0; i < 10; i++) {
-        UA_ExtensionObject *eo = &((UA_ExtensionObject*)var2.data)[i];
-        ck_assert_int_eq(eo->encoding, UA_EXTENSIONOBJECT_DECODED);
-        ck_assert(eo->content.decoded.type == &PointType);
-        Point *p2 = (Point*)eo->content.decoded.data;
+        Point *p2 = &((Point*)var2.data)[i];
 
         // we need to cast floats to int to avoid comparison of floats
         // which may result into false results

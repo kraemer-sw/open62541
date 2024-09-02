@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. 
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
  *    Copyright 2014-2018 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2014-2017 (c) Florian Palm
@@ -25,18 +25,13 @@
 #include "ua_pubsub_ns0.h"
 #endif
 
-#include "ua_pubsub_manager.h"
-
 #ifdef UA_ENABLE_SUBSCRIPTIONS
 #include "ua_subscription.h"
 #endif
 
-#ifdef UA_ENABLE_VALGRIND_INTERACTIVE
-#include <valgrind/memcheck.h>
+#ifdef UA_ENABLE_NODESET_INJECTOR
+#include "open62541/nodesetinjector.h"
 #endif
-
-#define STARTCHANNELID 1
-#define STARTTOKENID 1
 
 /**********************/
 /* Namespace Handling */
@@ -52,6 +47,7 @@
  *
  * Therefore one has to set the custom NS1 URI before one of the previously
  * mentioned steps. */
+
 void
 setupNs1Uri(UA_Server *server) {
     if(!server->namespaces[1].data) {
@@ -65,9 +61,9 @@ UA_UInt16 addNamespace(UA_Server *server, const UA_String name) {
     setupNs1Uri(server);
 
     /* Check if the namespace already exists in the server's namespace array */
-    for(UA_UInt16 i = 0; i < server->namespacesSize; ++i) {
+    for(size_t i = 0; i < server->namespacesSize; ++i) {
         if(UA_String_equal(&name, &server->namespaces[i]))
-            return i;
+            return (UA_UInt16) i;
     }
 
     /* Make the array bigger */
@@ -125,7 +121,7 @@ getNamespaceByIndex(UA_Server *server, const size_t namespaceIndex,
     /* ensure that the uri for ns1 is set up from the app description */
     setupNs1Uri(server);
     UA_StatusCode res = UA_STATUSCODE_BADNOTFOUND;
-    if(namespaceIndex > server->namespacesSize)
+    if(namespaceIndex >= server->namespacesSize)
         return res;
     res = UA_String_copy(&server->namespaces[namespaceIndex], foundUri);
     return res;
@@ -174,22 +170,94 @@ cleanup:
     return res;
 }
 
+/*********************/
+/* Server Components */
+/*********************/
+
+enum ZIP_CMP
+cmpServerComponent(const UA_UInt64 *a, const UA_UInt64 *b) {
+    if(*a == *b)
+        return ZIP_CMP_EQ;
+    return (*a < *b) ? ZIP_CMP_LESS : ZIP_CMP_MORE;
+}
+
+void
+addServerComponent(UA_Server *server, UA_ServerComponent *sc,
+                   UA_UInt64 *identifier) {
+    if(!sc)
+        return;
+
+    sc->identifier = ++server->serverComponentIds;
+    ZIP_INSERT(UA_ServerComponentTree, &server->serverComponents, sc);
+
+    /* Start the component if the server is started */
+    if(server->state == UA_LIFECYCLESTATE_STARTED && sc->start)
+        sc->start(server, sc);
+
+    if(identifier)
+        *identifier = sc->identifier;
+}
+
+static void *
+findServerComponent(void *context, UA_ServerComponent *sc) {
+    UA_String *name = (UA_String*)context;
+    return (UA_String_equal(&sc->name, name)) ? sc : NULL;
+}
+
+UA_ServerComponent *
+getServerComponentByName(UA_Server *server, UA_String name) {
+    return (UA_ServerComponent*)
+        ZIP_ITER(UA_ServerComponentTree, &server->serverComponents,
+                 findServerComponent, &name);
+}
+
+static void *
+removeServerComponent(void *application, UA_ServerComponent *sc) {
+    UA_assert(sc->state == UA_LIFECYCLESTATE_STOPPED);
+    sc->free((UA_Server*)application, sc);
+    return NULL;
+}
+
+static void *
+startServerComponent(void *application, UA_ServerComponent *sc) {
+    sc->start((UA_Server*)application, sc);
+    return NULL;
+}
+
+static void *
+stopServerComponent(void *application, UA_ServerComponent *sc) {
+    sc->stop((UA_Server*)application, sc);
+    return NULL;
+}
+
+/* ZIP_ITER returns NULL only if all components are stopped */
+static void *
+checkServerComponent(void *application, UA_ServerComponent *sc) {
+    return (sc->state == UA_LIFECYCLESTATE_STOPPED) ? NULL : (void*)0x01;
+}
+
 /********************/
 /* Server Lifecycle */
 /********************/
 
-static void
-serverExecuteRepeatedCallback(UA_Server *server, UA_ApplicationCallback cb,
-                              void *callbackApplication, void *data);
-
 /* The server needs to be stopped before it can be deleted */
-void UA_Server_delete(UA_Server *server) {
+UA_StatusCode
+UA_Server_delete(UA_Server *server) {
+    if(server == NULL) {
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    if(server->state != UA_LIFECYCLESTATE_STOPPED) {
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
+                     "The server must be fully stopped before it can be deleted");
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
     UA_LOCK(&server->serviceMutex);
 
-    UA_Server_deleteSecureChannels(server);
     session_list_entry *current, *temp;
     LIST_FOREACH_SAFE(current, &server->sessions, pointers, temp) {
-        UA_Server_removeSession(server, current, UA_DIAGNOSTICEVENT_CLOSE);
+        UA_Server_removeSession(server, current, UA_SHUTDOWNREASON_CLOSE);
     }
     UA_Array_delete(server->namespaces, server->namespacesSize, &UA_TYPES[UA_TYPES_STRING]);
 
@@ -218,10 +286,6 @@ void UA_Server_delete(UA_Server *server) {
     UA_PubSubManager_delete(server, &server->pubSubManager);
 #endif
 
-#ifdef UA_ENABLE_DISCOVERY
-    UA_DiscoveryManager_clear(&server->discoveryManager, server);
-#endif
-
 #if UA_MULTITHREADING >= 100
     UA_AsyncManager_clear(&server->asyncManager, server);
 #endif
@@ -229,35 +293,31 @@ void UA_Server_delete(UA_Server *server) {
     /* Clean up the Admin Session */
     UA_Session_clear(&server->adminSession, server);
 
-    UA_UNLOCK(&server->serviceMutex); /* The timer has its own mutex */
+    /* Remove all remaining server components (must be all stopped) */
+    ZIP_ITER(UA_ServerComponentTree, &server->serverComponents,
+             removeServerComponent, server);
 
-    /* Execute all remaining delayed events and clean up the timer */
-    UA_Timer_process(&server->timer, UA_DateTime_nowMonotonic() + 1,
-             (UA_TimerExecutionCallback)serverExecuteRepeatedCallback, server);
-    UA_Timer_clear(&server->timer);
+    UA_UNLOCK(&server->serviceMutex); /* The timer has its own mutex */
 
     /* Clean up the config */
     UA_ServerConfig_clean(&server->config);
 
 #if UA_MULTITHREADING >= 100
-    UA_LOCK_DESTROY(&server->networkMutex);
     UA_LOCK_DESTROY(&server->serviceMutex);
 #endif
 
-    /* Delete the server itself */
+    /* Delete the server itself and return */
     UA_free(server);
+    return UA_STATUSCODE_GOOD;
 }
 
-/* Recurring cleanup. Removing unused and timed-out channels and sessions */
+/* Regular house-keeping tasks. Removing unused and timed-out channels and
+ * sessions. */
 static void
-UA_Server_cleanup(UA_Server *server, void *_) {
+serverHouseKeeping(UA_Server *server, void *_) {
     UA_LOCK(&server->serviceMutex);
     UA_DateTime nowMonotonic = UA_DateTime_nowMonotonic();
     UA_Server_cleanupSessions(server, nowMonotonic);
-    UA_Server_cleanupTimedOutSecureChannels(server, nowMonotonic);
-#ifdef UA_ENABLE_DISCOVERY
-    UA_Discovery_cleanupTimedOut(server, nowMonotonic);
-#endif
     UA_UNLOCK(&server->serviceMutex);
 }
 
@@ -273,12 +333,10 @@ UA_Boolean UA_Server_NodestoreIsConfigured(UA_Server *server) {
 
 static UA_Server *
 UA_Server_init(UA_Server *server) {
-
     UA_StatusCode res = UA_STATUSCODE_GOOD;
     UA_CHECK_FATAL(UA_Server_NodestoreIsConfigured(server), goto cleanup,
-                    &server->config.logger, UA_LOGCATEGORY_SERVER,
-                    "No Nodestore configured in the server"
-                   );
+                   server->config.logging, UA_LOGCATEGORY_SERVER,
+                   "No Nodestore configured in the server");
 
     /* Init start time to zero, the actual start time will be sampled in
      * UA_Server_run_startup() */
@@ -289,13 +347,8 @@ UA_Server_init(UA_Server *server) {
     UA_random_seed((UA_UInt64)UA_DateTime_now());
 #endif
 
-#if UA_MULTITHREADING >= 100
-    UA_LOCK_INIT(&server->networkMutex);
     UA_LOCK_INIT(&server->serviceMutex);
-#endif
-
-    /* Initialize the handling of repeated callbacks */
-    UA_Timer_init(&server->timer);
+    UA_LOCK(&server->serviceMutex);
 
     /* Initialize the adminSession */
     UA_Session_init(&server->adminSession);
@@ -313,12 +366,6 @@ UA_Server_init(UA_Server *server) {
     server->namespaces[1] = UA_STRING_NULL;
     server->namespacesSize = 2;
 
-    /* Initialize SecureChannel */
-    TAILQ_INIT(&server->channels);
-    /* TODO: use an ID that is likely to be unique after a restart */
-    server->lastChannelId = STARTCHANNELID;
-    server->lastTokenId = STARTTOKENID;
-
     /* Initialize Session Management */
     LIST_INIT(&server->sessions);
     server->sessionCount = 0;
@@ -327,18 +374,32 @@ UA_Server_init(UA_Server *server) {
     UA_AsyncManager_init(&server->asyncManager, server);
 #endif
 
-    /* Add a regular callback for cleanup and maintenance. With a 10s interval. */
-    UA_Server_addRepeatedCallback(server, (UA_ServerCallback)UA_Server_cleanup, NULL,
-                                  10000.0, NULL);
+    /* Initialize the binay protocol support */
+    addServerComponent(server, UA_BinaryProtocolManager_new(server), NULL);
+
+    /* Initialized discovery */
+#ifdef UA_ENABLE_DISCOVERY
+    addServerComponent(server, UA_DiscoveryManager_new(server), NULL);
+#endif
 
     /* Initialize namespace 0*/
-    res = UA_Server_initNS0(server);
+    res = initNS0(server);
     UA_CHECK_STATUS(res, goto cleanup);
 
+#ifdef UA_ENABLE_NODESET_INJECTOR
+    UA_UNLOCK(&server->serviceMutex);
+    res = UA_Server_injectNodesets(server);
+    UA_LOCK(&server->serviceMutex);
+    UA_CHECK_STATUS(res, goto cleanup);
+#endif
+
 #ifdef UA_ENABLE_PUBSUB
-    /* Build PubSub information model */
+    /* Initialized PubSubManager */
+    UA_PubSubManager_init(server, &server->pubSubManager);
+
 #ifdef UA_ENABLE_PUBSUB_INFORMATIONMODEL
-    UA_Server_initPubSubNS0(server);
+    /* Build PubSub information model */
+    initPubSubNS0(server);
 #endif
 
 #ifdef UA_ENABLE_PUBSUB_MONITORING
@@ -347,9 +408,12 @@ UA_Server_init(UA_Server *server) {
     UA_CHECK_STATUS(res, goto cleanup);
 #endif /* UA_ENABLE_PUBSUB_MONITORING */
 #endif /* UA_ENABLE_PUBSUB */
+
+    UA_UNLOCK(&server->serviceMutex);
     return server;
 
  cleanup:
+    UA_UNLOCK(&server->serviceMutex);
     UA_Server_delete(server);
     return NULL;
 }
@@ -358,14 +422,19 @@ UA_Server *
 UA_Server_newWithConfig(UA_ServerConfig *config) {
     UA_CHECK_MEM(config, return NULL);
 
+    UA_CHECK_LOG(config->eventLoop != NULL, return NULL, ERROR,
+                 config->logging, UA_LOGCATEGORY_SERVER, "No EventLoop configured");
+
     UA_Server *server = (UA_Server *)UA_calloc(1, sizeof(UA_Server));
     UA_CHECK_MEM(server, UA_ServerConfig_clean(config); return NULL);
 
     server->config = *config;
-    /* The config might have been "moved" into the server struct. Ensure that
-     * the logger pointer is correct. */
-    for(size_t i = 0; i < server->config.securityPoliciesSize; i++)
-        server->config.securityPolicies[i].logger = &server->config.logger;
+
+    /* If not defined, set logging to what the server has */
+    if(!server->config.secureChannelPKI.logging)
+        server->config.secureChannelPKI.logging = server->config.logging;
+    if(!server->config.sessionPKI.logging)
+        server->config.sessionPKI.logging = server->config.logging;
 
     /* Reset the old config */
     memset(config, 0, sizeof(UA_ServerConfig));
@@ -379,7 +448,7 @@ setServerShutdown(UA_Server *server) {
         return false;
     if(server->config.shutdownDelay == 0)
         return true;
-    UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
+    UA_LOG_WARNING(server->config.logging, UA_LOGCATEGORY_SERVER,
                    "Shutting down the server with a delay of %i ms", (int)server->config.shutdownDelay);
     server->endTime = UA_DateTime_now() + (UA_DateTime)(server->config.shutdownDelay * UA_DATETIME_MSEC);
     return false;
@@ -393,22 +462,21 @@ UA_StatusCode
 UA_Server_addTimedCallback(UA_Server *server, UA_ServerCallback callback,
                            void *data, UA_DateTime date, UA_UInt64 *callbackId) {
     UA_LOCK(&server->serviceMutex);
-    UA_StatusCode retval =
-        UA_Timer_addTimedCallback(&server->timer,
-                                  (UA_ApplicationCallback)callback,
-                                  server, data, date, callbackId);
+    UA_StatusCode retval = server->config.eventLoop->
+        addTimedCallback(server->config.eventLoop, (UA_Callback)callback,
+                         server, data, date, callbackId);
     UA_UNLOCK(&server->serviceMutex);
     return retval;
 }
 
 UA_StatusCode
 addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
-                              void *data, UA_Double interval_ms,
-                              UA_UInt64 *callbackId) {
-    return UA_Timer_addRepeatedCallback(&server->timer,
-                                        (UA_ApplicationCallback)callback,
-                                         server, data, interval_ms, NULL,
-                                         UA_TIMER_HANDLE_CYCLEMISS_WITH_CURRENTTIME, callbackId);
+                    void *data, UA_Double interval_ms, UA_UInt64 *callbackId) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    return server->config.eventLoop->
+        addCyclicCallback(server->config.eventLoop, (UA_Callback) callback,
+                          server, data, interval_ms, NULL,
+                          UA_TIMER_HANDLE_CYCLEMISS_WITH_CURRENTTIME, callbackId);
 }
 
 UA_StatusCode
@@ -416,17 +484,18 @@ UA_Server_addRepeatedCallback(UA_Server *server, UA_ServerCallback callback,
                               void *data, UA_Double interval_ms,
                               UA_UInt64 *callbackId) {
     UA_LOCK(&server->serviceMutex);
-    UA_StatusCode retval =
-        addRepeatedCallback(server, callback, data, interval_ms, callbackId);
+    UA_StatusCode res = addRepeatedCallback(server, callback, data, interval_ms, callbackId);
     UA_UNLOCK(&server->serviceMutex);
-    return retval;
+    return res;
 }
 
 UA_StatusCode
 changeRepeatedCallbackInterval(UA_Server *server, UA_UInt64 callbackId,
                                UA_Double interval_ms) {
-    return UA_Timer_changeRepeatedCallback(&server->timer, callbackId,
-                                           interval_ms, NULL, UA_TIMER_HANDLE_CYCLEMISS_WITH_CURRENTTIME);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    return server->config.eventLoop->
+        modifyCyclicCallback(server->config.eventLoop, callbackId, interval_ms,
+                             NULL, UA_TIMER_HANDLE_CYCLEMISS_WITH_CURRENTTIME);
 }
 
 UA_StatusCode
@@ -441,7 +510,11 @@ UA_Server_changeRepeatedCallbackInterval(UA_Server *server, UA_UInt64 callbackId
 
 void
 removeCallback(UA_Server *server, UA_UInt64 callbackId) {
-    UA_Timer_removeCallback(&server->timer, callbackId);
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+    UA_EventLoop *el = server->config.eventLoop;
+    if(el) {
+        el->removeCyclicCallback(el, callbackId);
+    }
 }
 
 void
@@ -451,6 +524,16 @@ UA_Server_removeCallback(UA_Server *server, UA_UInt64 callbackId) {
     UA_UNLOCK(&server->serviceMutex);
 }
 
+static void
+notifySecureChannelsStopped(UA_Server *server, struct UA_ServerComponent *sc,
+                            UA_LifecycleState state) {
+    if(sc->state == UA_LIFECYCLESTATE_STOPPED &&
+       server->state == UA_LIFECYCLESTATE_STARTED) {
+        sc->notifyState = NULL; /* remove the callback */
+        sc->start(server, sc);
+    }
+}
+
 UA_StatusCode
 UA_Server_updateCertificate(UA_Server *server,
                             const UA_ByteString *oldCertificate,
@@ -458,29 +541,32 @@ UA_Server_updateCertificate(UA_Server *server,
                             const UA_ByteString *newPrivateKey,
                             UA_Boolean closeSessions,
                             UA_Boolean closeSecureChannels) {
-
     UA_CHECK(server && oldCertificate && newCertificate && newPrivateKey,
              return UA_STATUSCODE_BADINTERNALERROR);
 
     if(closeSessions) {
         session_list_entry *current;
         LIST_FOREACH(current, &server->sessions, pointers) {
+            UA_SessionHeader *header = &current->session.header;
             if(UA_ByteString_equal(oldCertificate,
-                                    &current->session.header.channel->securityPolicy->localCertificate)) {
+                                    &header->channel->securityPolicy->localCertificate)) {
                 UA_LOCK(&server->serviceMutex);
-                UA_Server_removeSessionByToken(server, &current->session.header.authenticationToken,
-                                               UA_DIAGNOSTICEVENT_CLOSE);
+                UA_Server_removeSessionByToken(server, &header->authenticationToken,
+                                               UA_SHUTDOWNREASON_CLOSE);
                 UA_UNLOCK(&server->serviceMutex);
             }
         }
 
     }
 
+    /* Gracefully close all SecureChannels. And restart the
+     * BinaryProtocolManager once it has fully stopped. */
     if(closeSecureChannels) {
-        channel_entry *entry;
-        TAILQ_FOREACH(entry, &server->channels, pointers) {
-            if(UA_ByteString_equal(&entry->channel.securityPolicy->localCertificate, oldCertificate))
-                UA_Server_closeSecureChannel(server, &entry->channel, UA_DIAGNOSTICEVENT_CLOSE);
+        UA_ServerComponent *binaryProtocolManager =
+            getServerComponentByName(server, UA_STRING("binary"));
+        if(binaryProtocolManager) {
+            binaryProtocolManager->notifyState = notifySecureChannelsStopped;
+            binaryProtocolManager->stop(server, binaryProtocolManager);
         }
     }
 
@@ -525,12 +611,12 @@ verifyServerApplicationURI(const UA_Server *server) {
         UA_SecurityPolicy *sp = &server->config.securityPolicies[i];
         if(UA_String_equal(&sp->policyUri, &securityPolicyNoneUri) && (sp->localCertificate.length == 0))
             continue;
-        UA_StatusCode retval = server->config.certificateVerification.
-            verifyApplicationURI(server->config.certificateVerification.context,
+        UA_StatusCode retval = server->config.secureChannelPKI.
+            verifyApplicationURI(&server->config.secureChannelPKI,
                                  &sp->localCertificate,
                                  &server->config.applicationDescription.applicationUri);
 
-        UA_CHECK_STATUS_ERROR(retval, return retval, &server->config.logger, UA_LOGCATEGORY_SERVER,
+        UA_CHECK_STATUS_ERROR(retval, return retval, server->config.logging, UA_LOGCATEGORY_SERVER,
                        "The configured ApplicationURI \"%.*s\"does not match the "
                        "ApplicationURI specified in the certificate for the "
                        "SecurityPolicy %.*s",
@@ -545,21 +631,14 @@ verifyServerApplicationURI(const UA_Server *server) {
 UA_ServerStatistics
 UA_Server_getStatistics(UA_Server *server) {
     UA_ServerStatistics stat;
-    stat.ns = server->networkStatistics;
     stat.scs = server->secureChannelStatistics;
-
+    UA_ServerDiagnosticsSummaryDataType *sds = &server->serverDiagnosticsSummary;
     stat.ss.currentSessionCount = server->activeSessionCount;
-    stat.ss.cumulatedSessionCount =
-        server->serverDiagnosticsSummary.cumulatedSessionCount;
-    stat.ss.securityRejectedSessionCount =
-        server->serverDiagnosticsSummary.securityRejectedSessionCount;
-    stat.ss.rejectedSessionCount =
-        server->serverDiagnosticsSummary.rejectedSessionCount;
-    stat.ss.sessionTimeoutCount =
-        server->serverDiagnosticsSummary.sessionTimeoutCount;
-    stat.ss.sessionAbortCount =
-        server->serverDiagnosticsSummary.sessionAbortCount;
-    
+    stat.ss.cumulatedSessionCount = sds->cumulatedSessionCount;
+    stat.ss.securityRejectedSessionCount = sds->securityRejectedSessionCount;
+    stat.ss.rejectedSessionCount = sds->rejectedSessionCount;
+    stat.ss.sessionTimeoutCount = sds->sessionTimeoutCount;
+    stat.ss.sessionAbortCount = sds->sessionAbortCount;
     return stat;
 }
 
@@ -567,7 +646,26 @@ UA_Server_getStatistics(UA_Server *server) {
 /* Main Server Loop */
 /********************/
 
-#define UA_MAXTIMEOUT 50 /* Max timeout in ms between main-loop iterations */
+#define UA_MAXTIMEOUT 200 /* Max timeout in ms between main-loop iterations */
+
+void
+setServerLifecycleState(UA_Server *server, UA_LifecycleState state) {
+    UA_LOCK_ASSERT(&server->serviceMutex, 1);
+
+    if(server->state == state)
+        return;
+    server->state = state;
+    if(server->config.notifyLifecycleState) {
+        UA_UNLOCK(&server->serviceMutex);
+        server->config.notifyLifecycleState(server, server->state);
+        UA_LOCK(&server->serviceMutex);
+    }
+}
+
+UA_LifecycleState
+UA_Server_getLifecycleState(UA_Server *server) {
+    return server->state;
+}
 
 /* Start: Spin up the workers and the network layer and sample the server's
  *        start time.
@@ -578,195 +676,241 @@ UA_Server_getStatistics(UA_Server *server) {
 
 UA_StatusCode
 UA_Server_run_startup(UA_Server *server) {
+    if(server == NULL) {
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    }
+    UA_ServerConfig *config = &server->config;
 
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-    /* Prominently warn user that fuzzing build is enabled. This will tamper with authentication tokens and other important variables
-     * E.g. if fuzzing is enabled, and two clients are connected, subscriptions do not work properly,
-     * since the tokens will be overridden to allow easier fuzzing. */
-    UA_LOG_FATAL(&server->config.logger, UA_LOGCATEGORY_SERVER,
+    /* Prominently warn user that fuzzing build is enabled. This will tamper
+     * with authentication tokens and other important variables E.g. if fuzzing
+     * is enabled, and two clients are connected, subscriptions do not work
+     * properly, since the tokens will be overridden to allow easier fuzzing. */
+    UA_LOG_FATAL(server->config.logging, UA_LOGCATEGORY_SERVER,
                  "Server was built with unsafe fuzzing mode. "
                  "This should only be used for specific fuzzing builds.");
 #endif
 
-    /* ensure that the uri for ns1 is set up from the app description */
-    setupNs1Uri(server);
-
-    /* write ServerArray with same ApplicationURI value as NamespaceArray */
-    UA_StatusCode retVal =
-        writeNs0VariableArray(server, UA_NS0ID_SERVER_SERVERARRAY,
-                              &server->config.applicationDescription.applicationUri,
-                              1, &UA_TYPES[UA_TYPES_STRING]);
-    UA_CHECK_STATUS(retVal, return retVal);
-
-    if(server->state > UA_SERVERLIFECYCLE_FRESH)
-        return UA_STATUSCODE_GOOD;
-
-    /* At least one endpoint has to be configured */
-    if(server->config.endpointsSize == 0) {
-        UA_LOG_WARNING(&server->config.logger, UA_LOGCATEGORY_SERVER,
-                       "There has to be at least one endpoint.");
+    if(server->state != UA_LIFECYCLESTATE_STOPPED) {
+        UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
+                       "The server has already been started");
+        return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    /* Initialized discovery */
-#ifdef UA_ENABLE_DISCOVERY
-    UA_DiscoveryManager_init(&server->discoveryManager, server);
-#endif
+    /* Check if UserIdentityTokens are defined */
+    bool hasUserIdentityTokens = false;
+    for(size_t i = 0; i < config->endpointsSize; i++) {
+        if(config->endpoints[i].userIdentityTokensSize > 0) {
+            hasUserIdentityTokens = true;
+            break;
+        }
+    }
+    if(config->accessControl.userTokenPoliciesSize == 0 && hasUserIdentityTokens == false) {
+        UA_LOG_ERROR(config->logging, UA_LOGCATEGORY_SERVER,
+                     "The server has no userIdentificationPolicies defined.");
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    /* Start the EventLoop if not already started */
+    UA_StatusCode retVal = UA_STATUSCODE_GOOD;
+    UA_EventLoop *el = config->eventLoop;
+    UA_CHECK_MEM_ERROR(el, return UA_STATUSCODE_BADINTERNALERROR,
+                       config->logging, UA_LOGCATEGORY_SERVER,
+                       "An EventLoop must be configured");
+
+    if(el->state != UA_EVENTLOOPSTATE_STARTED) {
+        retVal = el->start(el);
+        UA_CHECK_STATUS(retVal, return retVal); /* Errors are logged internally */
+    }
+
+    /* Take the server lock */
+    UA_LOCK(&server->serviceMutex);
 
     /* Does the ApplicationURI match the local certificates? */
 #ifdef UA_ENABLE_ENCRYPTION
     retVal = verifyServerApplicationURI(server);
-    UA_CHECK_STATUS(retVal, return retVal);
+    UA_CHECK_STATUS(retVal, UA_UNLOCK(&server->serviceMutex); return retVal);
 #endif
+
+    /* Are there enough SecureChannels possible for the max number of sessions? */
+    if(config->maxSecureChannels != 0 &&
+       (config->maxSessions == 0 || config->maxSessions >= config->maxSecureChannels)) {
+        UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
+                       "Maximum SecureChannels count not enough for the "
+                       "maximum Sessions count");
+    }
+
+    /* Add a regular callback for housekeeping tasks. With a 1s interval. */
+    retVal = addRepeatedCallback(server, serverHouseKeeping,
+                                 NULL, 1000.0, &server->houseKeepingCallbackId);
+    UA_CHECK_STATUS_ERROR(retVal, UA_UNLOCK(&server->serviceMutex); return retVal,
+                          config->logging, UA_LOGCATEGORY_SERVER,
+                          "Could not create the server housekeeping task");
+
+    /* Ensure that the uri for ns1 is set up from the app description */
+    UA_String_clear(&server->namespaces[1]);
+    setupNs1Uri(server);
+
+    /* At least one endpoint has to be configured */
+    if(config->endpointsSize == 0) {
+        UA_LOG_WARNING(config->logging, UA_LOGCATEGORY_SERVER,
+                       "There has to be at least one endpoint.");
+    }
+
+    /* Update Endpoint description */
+    for(size_t i = 0; i < config->endpointsSize; ++i) {
+        UA_ApplicationDescription_clear(&config->endpoints[i].server);
+        UA_ApplicationDescription_copy(&config->applicationDescription,
+                                       &config->endpoints[i].server);
+    }
+
+    /* Write ServerArray with same ApplicationUri value as NamespaceArray */
+    UA_Variant var;
+    UA_Variant_init(&var);
+    UA_Variant_setArray(&var, &config->applicationDescription.applicationUri,
+                        1, &UA_TYPES[UA_TYPES_STRING]);
+    UA_NodeId serverArray = UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERARRAY);
+    writeValueAttribute(server, serverArray, &var);
 
     /* Sample the start time and set it to the Server object */
     server->startTime = UA_DateTime_now();
-    UA_Variant var;
     UA_Variant_init(&var);
     UA_Variant_setScalar(&var, &server->startTime, &UA_TYPES[UA_TYPES_DATETIME]);
-    UA_Server_writeValue(server,
-                         UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STARTTIME),
-                         var);
+    UA_NodeId startTime =
+        UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_STARTTIME);
+    writeValueAttribute(server, startTime, &var);
 
-    /* Start the networklayers */
-    UA_StatusCode result = UA_STATUSCODE_GOOD;
-    for(size_t i = 0; i < server->config.networkLayersSize; ++i) {
-        UA_ServerNetworkLayer *nl = &server->config.networkLayers[i];
-        nl->statistics = &server->networkStatistics;
-        result |= nl->start(nl, &server->config.logger, &server->config.customHostname);
-    }
-    UA_CHECK_STATUS(result, return result);
+    /* Start all ServerComponents */
+    ZIP_ITER(UA_ServerComponentTree, &server->serverComponents,
+             startServerComponent, server);
 
-    /* Update the application description to match the previously added
-     * discovery urls. We can only do this after the network layer is started
-     * since it inits the discovery url */
-    if(server->config.applicationDescription.discoveryUrlsSize != 0) {
-        UA_Array_delete(server->config.applicationDescription.discoveryUrls,
-                        server->config.applicationDescription.discoveryUrlsSize,
-                        &UA_TYPES[UA_TYPES_STRING]);
-        server->config.applicationDescription.discoveryUrlsSize = 0;
-    }
-    server->config.applicationDescription.discoveryUrls = (UA_String *)
-        UA_Array_new(server->config.networkLayersSize, &UA_TYPES[UA_TYPES_STRING]);
-    UA_CHECK_MEM(server->config.applicationDescription.discoveryUrls,
-             return UA_STATUSCODE_BADOUTOFMEMORY);
-
-    server->config.applicationDescription.discoveryUrlsSize =
-        server->config.networkLayersSize;
-    for(size_t i = 0; i < server->config.applicationDescription.discoveryUrlsSize; i++) {
-        UA_ServerNetworkLayer *nl = &server->config.networkLayers[i];
-        UA_String_copy(&nl->discoveryUrl,
-                       &server->config.applicationDescription.discoveryUrls[i]);
+    /* Check that the binary protocol support component have been started */
+    UA_ServerComponent *binaryProtocolManager =
+        getServerComponentByName(server, UA_STRING("binary"));
+    if(binaryProtocolManager->state != UA_LIFECYCLESTATE_STARTED) {
+        UA_LOG_ERROR(config->logging, UA_LOGCATEGORY_SERVER,
+                       "The binary protocol support component could not been started.");
+        /* Stop all server components that have already been started */
+        ZIP_ITER(UA_ServerComponentTree, &server->serverComponents,
+                 stopServerComponent, server);
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    /* Start the multicast discovery server */
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
-    if(server->config.mdnsEnabled)
-        startMulticastDiscoveryServer(server);
-#endif
+    /* Set the server to STARTED. From here on, only use
+     * UA_Server_run_shutdown(server) to stop the server. */
+    setServerLifecycleState(server, UA_LIFECYCLESTATE_STARTED);
 
-    /* Update Endpoint description */
-    for(size_t i = 0; i < server->config.endpointsSize; ++i){
-        UA_ApplicationDescription_clear(&server->config.endpoints[i].server);
-        UA_ApplicationDescription_copy(&server->config.applicationDescription,
-                                       &server->config.endpoints[i].server);
-    }
-
-    server->state = UA_SERVERLIFECYCLE_FRESH;
-
-    return result;
-}
-
-static void
-serverExecuteRepeatedCallback(UA_Server *server, UA_ApplicationCallback cb,
-                              void *callbackApplication, void *data) {
-    /* Service mutex is not set inside the timer that triggers the callback */
-    /* The following check cannot be used since another thread can take the
-     * serviceMutex during a server_iterate_call. */
-    //UA_LOCK_ASSERT(&server->serviceMutex, 0);
-    cb(callbackApplication, data);
+    UA_UNLOCK(&server->serviceMutex);
+    return UA_STATUSCODE_GOOD;
 }
 
 UA_UInt16
 UA_Server_run_iterate(UA_Server *server, UA_Boolean waitInternal) {
-    /* Process repeated work */
-    UA_DateTime now = UA_DateTime_nowMonotonic();
-    UA_DateTime nextRepeated = UA_Timer_process(&server->timer, now,
-                     (UA_TimerExecutionCallback)serverExecuteRepeatedCallback, server);
-    UA_DateTime latest = now + (UA_MAXTIMEOUT * UA_DATETIME_MSEC);
-    if(nextRepeated > latest)
-        nextRepeated = latest;
+    /* Make sure an EventLoop is configured */
+    UA_EventLoop *el = server->config.eventLoop;
+    if(!el)
+        return 0;
 
-    UA_UInt16 timeout = 0;
+    /* Process timed and network events in the EventLoop */
+    UA_UInt32 timeout = (waitInternal) ? UA_MAXTIMEOUT : 0;
+    el->run(el, timeout);
 
-    /* round always to upper value to avoid timeout to be set to 0
-    * if(nextRepeated - now) < (UA_DATETIME_MSEC/2) */
-    if(waitInternal)
-        timeout = (UA_UInt16)(((nextRepeated - now) + (UA_DATETIME_MSEC - 1)) / UA_DATETIME_MSEC);
-
-    /* Listen on the networklayer */
-    for(size_t i = 0; i < server->config.networkLayersSize; ++i) {
-        UA_ServerNetworkLayer *nl = &server->config.networkLayers[i];
-        nl->listen(nl, server, timeout);
-    }
-
-#if defined(UA_ENABLE_PUBSUB_MQTT)
-    /* Listen on the pubsublayer, but only if the yield function is set */
-    UA_PubSubConnection *connection;
-    TAILQ_FOREACH(connection, &server->pubSubManager.connections, listEntry){
-        UA_PubSubConnection *ps = connection;
-        if(ps && ps->channel->yield){
-            ps->channel->yield(ps->channel, timeout);
-        }
-    }
-#endif
-
-    UA_LOCK(&server->serviceMutex);
-
-#if defined(UA_ENABLE_DISCOVERY_MULTICAST) && (UA_MULTITHREADING < 200)
-    if(server->config.mdnsEnabled) {
-        /* TODO multicastNextRepeat does not consider new input data (requests)
-         * on the socket. It will be handled on the next call. if needed, we
-         * need to use select with timeout on the multicast socket
-         * server->mdnsSocket (see example in mdnsd library) on higher level. */
-        UA_DateTime multicastNextRepeat = 0;
-        UA_StatusCode hasNext =
-            iterateMulticastDiscoveryServer(server, &multicastNextRepeat, true);
-        if(hasNext == UA_STATUSCODE_GOOD && multicastNextRepeat < nextRepeated)
-            nextRepeated = multicastNextRepeat;
-    }
-#endif
-
-    UA_UNLOCK(&server->serviceMutex);
-
-    now = UA_DateTime_nowMonotonic();
-    timeout = 0;
-    if(nextRepeated > now)
-        timeout = (UA_UInt16)((nextRepeated - now) / UA_DATETIME_MSEC);
-    return timeout;
-}
-
-UA_StatusCode
-UA_Server_run_shutdown(UA_Server *server) {
-    /* Stop the netowrk layer */
-    for(size_t i = 0; i < server->config.networkLayersSize; ++i) {
-        UA_ServerNetworkLayer *nl = &server->config.networkLayers[i];
-        nl->stop(nl, server);
-    }
-
-#ifdef UA_ENABLE_DISCOVERY_MULTICAST
-    /* Stop multicast discovery */
-    if(server->config.mdnsEnabled)
-        stopMulticastDiscoveryServer(server);
-#endif
-
-    return UA_STATUSCODE_GOOD;
+    /* Return the time until the next scheduled callback */
+    UA_DateTime now = el->dateTime_nowMonotonic(el);
+    UA_DateTime nextTimeout = (el->nextCyclicTime(el) - now) / UA_DATETIME_MSEC;
+    if(nextTimeout < 0)
+        nextTimeout = 0;
+    if(nextTimeout > UA_UINT16_MAX)
+        nextTimeout = UA_UINT16_MAX;
+    return (UA_UInt16)nextTimeout;
 }
 
 static UA_Boolean
 testShutdownCondition(UA_Server *server) {
+    /* Was there a wait time until the shutdown configured? */
     if(server->endTime == 0)
         return false;
     return (UA_DateTime_now() > server->endTime);
+}
+
+static UA_Boolean
+testStoppedCondition(UA_Server *server) {
+    /* Check if there are remaining server components that did not fully stop */
+    if(ZIP_ITER(UA_ServerComponentTree, &server->serverComponents,
+                checkServerComponent, server) != NULL)
+        return false;
+    return true;
+}
+
+UA_StatusCode
+UA_Server_run_shutdown(UA_Server *server) {
+    if(server == NULL)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+
+    UA_LOCK(&server->serviceMutex);
+
+    if(server->state != UA_LIFECYCLESTATE_STARTED) {
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
+                     "The server is not started, cannot be shut down");
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_BADINTERNALERROR;
+    }
+
+    /* Set to stopping and notify the application */
+    setServerLifecycleState(server, UA_LIFECYCLESTATE_STOPPING);
+
+    /* Stop the regular housekeeping tasks */
+    if(server->houseKeepingCallbackId != 0) {
+        removeCallback(server, server->houseKeepingCallbackId);
+        server->houseKeepingCallbackId = 0;
+    }
+
+    /* Stop PubSub */
+#ifdef UA_ENABLE_PUBSUB
+    UA_PubSubManager_shutdown(server, &server->pubSubManager);
+#endif
+
+    /* Stop all ServerComponents */
+    ZIP_ITER(UA_ServerComponentTree, &server->serverComponents,
+             stopServerComponent, server);
+
+    /* Are we already stopped? */
+    if(testStoppedCondition(server)) {
+        setServerLifecycleState(server, UA_LIFECYCLESTATE_STOPPED);
+    }
+
+    /* Only stop the EventLoop if it is coupled to the server lifecycle  */
+    if(server->config.externalEventLoop) {
+        UA_UNLOCK(&server->serviceMutex);
+        return UA_STATUSCODE_GOOD;
+    }
+
+    /* Iterate the EventLoop until the server is stopped */
+    UA_StatusCode res = UA_STATUSCODE_GOOD;
+    UA_EventLoop *el = server->config.eventLoop;
+    while(!testStoppedCondition(server) &&
+          res == UA_STATUSCODE_GOOD) {
+        UA_UNLOCK(&server->serviceMutex);
+        res = el->run(el, 100);
+        UA_LOCK(&server->serviceMutex);
+    }
+
+    /* Stop the EventLoop. Iterate until stopped. */
+    el->stop(el);
+    while(el->state != UA_EVENTLOOPSTATE_STOPPED &&
+          el->state != UA_EVENTLOOPSTATE_FRESH &&
+          res == UA_STATUSCODE_GOOD) {
+        UA_UNLOCK(&server->serviceMutex);
+        res = el->run(el, 100);
+        UA_LOCK(&server->serviceMutex);
+    }
+
+    /* Set server lifecycle state to stopped if not already the case */
+    setServerLifecycleState(server, UA_LIFECYCLESTATE_STOPPED);
+
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
 }
 
 UA_StatusCode
@@ -774,17 +918,7 @@ UA_Server_run(UA_Server *server, const volatile UA_Boolean *running) {
     UA_StatusCode retval = UA_Server_run_startup(server);
     UA_CHECK_STATUS(retval, return retval);
 
-#ifdef UA_ENABLE_VALGRIND_INTERACTIVE
-    size_t loopCount = 0;
-#endif
     while(!testShutdownCondition(server)) {
-#ifdef UA_ENABLE_VALGRIND_INTERACTIVE
-        if(loopCount == 0) {
-            VALGRIND_DO_LEAK_CHECK;
-        }
-        ++loopCount;
-        loopCount %= UA_VALGRIND_INTERACTIVE_INTERVAL;
-#endif
         UA_Server_run_iterate(server, true);
         if(!*running) {
             if(setServerShutdown(server))
@@ -793,3 +927,4 @@ UA_Server_run(UA_Server *server, const volatile UA_Boolean *running) {
     }
     return UA_Server_run_shutdown(server);
 }
+

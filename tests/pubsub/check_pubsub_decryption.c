@@ -5,7 +5,6 @@
  * Copyright (c) 2017 - 2018 Fraunhofer IOSB (Author: Jan Hermes)
  */
 
-#include <open62541/plugin/pubsub_udp.h>
 #include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/server_config_default.h>
 #include <open62541/server_pubsub.h>
@@ -15,6 +14,7 @@
 
 #include <check.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 #include <mbedtls/aes.h>
 #include <mbedtls/ctr_drbg.h>
@@ -47,22 +47,19 @@ UA_Byte keyNonce[UA_AES128CTR_KEYNONCE_LENGTH] = {0};
 UA_Server *server = NULL;
 UA_NodeId writerGroupId, readerGroupId, connectionId;
 
-UA_Logger *logger = NULL;
-
 static void
 setup(void) {
     server = UA_Server_new();
     UA_ServerConfig *config = UA_Server_getConfig(server);
-    UA_ServerConfig_setDefault(config);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerUDPMP());
+    UA_StatusCode retVal = UA_ServerConfig_setDefault(config);
 
     config->pubSubConfig.securityPolicies =
         (UA_PubSubSecurityPolicy *)UA_malloc(sizeof(UA_PubSubSecurityPolicy));
     config->pubSubConfig.securityPoliciesSize = 1;
     UA_PubSubSecurityPolicy_Aes128Ctr(config->pubSubConfig.securityPolicies,
-                                      &config->logger);
+                                      config->logging);
 
-    UA_Server_run_startup(server);
+    retVal |= UA_Server_run_startup(server);
     // add connection
     UA_PubSubConnectionConfig connectionConfig;
     memset(&connectionConfig, 0, sizeof(UA_PubSubConnectionConfig));
@@ -73,10 +70,10 @@ setup(void) {
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri =
         UA_STRING("http://opcfoundation.org/UA-Profile/Transport/pubsub-udp-uadp");
-    connectionConfig.publisherId.numeric = 2234;
-    UA_Server_addPubSubConnection(server, &connectionConfig, &connectionId);
-
-    logger = &server->config.logger;
+    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT16;
+    connectionConfig.publisherId.uint16 = 2234;
+    retVal |= UA_Server_addPubSubConnection(server, &connectionConfig, &connectionId);
+    ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 }
 
 static void

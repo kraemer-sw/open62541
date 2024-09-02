@@ -137,7 +137,7 @@ def generateOpen62541Code(nodeset, outfilename, internal_headers=False, typesArr
 
     additionalHeaders = ""
     if len(typesArray) > 0:
-        for arr in set(typesArray):
+        for arr in typesArray:
             if arr == "UA_TYPES":
                 continue
             # remove ua_ prefix if exists
@@ -221,7 +221,7 @@ _UA_END_DECLS
     functionNumber = 0
 
     printed_ids = set()
-    reftypes_functionNumbers = set()
+    reftypes_functionNumbers = list()
     for node in sorted_nodes:
         printed_ids.add(node.id)
 
@@ -280,19 +280,20 @@ _UA_END_DECLS
         # of other nodes might depend on the subtyping information of the
         # referencetype to be complete.
         if isinstance(node, ReferenceTypeNode):
-            reftypes_functionNumbers.add(functionNumber)
+            reftypes_functionNumbers.append(functionNumber)
 
         functionNumber = functionNumber + 1
 
 
     # Load generated types
-    for arr in set(typesArray):
+    for arr in typesArray:
         if arr == "UA_TYPES":
             continue
         writec("\nstatic UA_DataTypeArray custom" + arr + " = {")
         writec("    NULL,")
         writec("    " + arr + "_COUNT,")
-        writec("    " + arr + "\n};")
+        writec("    " + arr + ",")
+        writec("    UA_FALSE\n};")
 
     writec("""
 UA_StatusCode %s(UA_Server *server) {
@@ -305,9 +306,24 @@ UA_StatusCode retVal = UA_STATUSCODE_GOOD;""" % (outfilebase))
         nsid = nsid.replace("\"", "\\\"")
         writec("ns[" + str(i) + "] = UA_Server_addNamespace(server, \"" + nsid + "\");")
 
+    # Change namespaceIndex from the current namespace,
+    # but only if it defines its own data types, otherwise it is not necessary.
+    if len(typesArray) > 0:
+        typeArr = typesArray[-1]
+        # Build the name of the TypeArray to compare if the current nodeset defines data types.
+        currentTypeArr = '_'.join(outfilebase.upper().split('_')[1:-1])
+        if typeArr != "UA_TYPES" and typeArr != "ns0" and typeArr == "UA_TYPES_"+currentTypeArr:
+            writec("/* Change namespaceIndex from current namespace */")
+            writec("#if " + typeArr + "_COUNT" + " > 0")
+            writec("for(int i = 0; i < " + typeArr + "_COUNT" + "; i++) {")
+            writec(typeArr + "[i]" + ".typeId.namespaceIndex = ns[" + str(len(nodeset.namespaces)-1) + "];")
+            writec(typeArr + "[i]" + ".binaryEncodingId.namespaceIndex = ns[" + str(len(nodeset.namespaces)-1) + "];")
+            writec("}")
+            writec("#endif")
+
     # Add generated types to the server
     writec("\n/* Load custom datatype definitions into the server */")
-    for arr in set(typesArray):
+    for arr in typesArray:
         if arr == "UA_TYPES":
             continue
         writec("if(" + arr + "_COUNT > 0) {")

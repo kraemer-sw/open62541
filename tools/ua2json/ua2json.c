@@ -1,27 +1,16 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. 
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
  *    Copyright 2018 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  */
 
-/* Enable POSIX features */
-#if !defined(_XOPEN_SOURCE)
-# define _XOPEN_SOURCE 600
-#endif
-#ifndef _DEFAULT_SOURCE
-# define _DEFAULT_SOURCE
-#endif
-/* On older systems we need to define _BSD_SOURCE.
- * _DEFAULT_SOURCE is an alias for that. */
-#ifndef _BSD_SOURCE
-# define _BSD_SOURCE
-#endif
-
 #include <open62541/types.h>
-#include <stdio.h>
 #include <open62541/types_generated.h>
 #include <open62541/types_generated_handling.h>
+
+#include <stdio.h>
+#include <unistd.h>
 
 /* Internal headers */
 #include "ua_pubsub_networkmessage.h"
@@ -47,6 +36,8 @@ encode(const UA_ByteString *buf, UA_ByteString *out, const UA_DataType *type) {
     return UA_STATUSCODE_GOOD;
 }
 
+static const UA_DecodeJsonOptions decode_options = {0};
+
 static UA_StatusCode
 decode(const UA_ByteString *buf, UA_ByteString *out, const UA_DataType *type) {
     /* Allocate memory for the type */
@@ -55,8 +46,7 @@ decode(const UA_ByteString *buf, UA_ByteString *out, const UA_DataType *type) {
         return UA_STATUSCODE_BADOUTOFMEMORY;
 
     /* Decode JSON */
-    const UA_DecodeJsonOptions opt = {NULL};
-    UA_StatusCode retval = UA_decodeJson(buf, data, type, &opt);
+    UA_StatusCode retval = UA_decodeJson(buf, data, type, &decode_options);
     if(retval != UA_STATUSCODE_GOOD) {
         free(data);
         return retval;
@@ -76,7 +66,7 @@ static UA_StatusCode
 encodeNetworkMessage(const UA_ByteString *buf, UA_ByteString *out) {
     size_t offset = 0;
     UA_NetworkMessage msg;
-    UA_StatusCode retval = UA_NetworkMessage_decodeBinary(buf, &offset, &msg);
+    UA_StatusCode retval = UA_NetworkMessage_decodeBinary(buf, &offset, &msg, NULL);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
@@ -173,7 +163,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: The first argument must be \"encode\" or \"decode\"\n");
         return -1;
     }
-        
+
     for(int argpos = 2; argpos < argc; argpos++) {
         if(strcmp(argv[argpos], "--help") == 0) {
             usage();
@@ -291,7 +281,7 @@ int main(int argc, char **argv) {
     } else {
         result = decode(&buf, &outbuf, type);
     }
-    
+
     if(result != UA_STATUSCODE_GOOD) {
         fprintf(stderr, "Error: Parsing failed with code %s\n",
                 UA_StatusCode_name(result));

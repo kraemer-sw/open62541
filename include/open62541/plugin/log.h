@@ -16,6 +16,8 @@
 _UA_BEGIN_DECLS
 
 /**
+ * .. _logging:
+ *
  * Logging Plugin API
  * ==================
  *
@@ -29,13 +31,15 @@ _UA_BEGIN_DECLS
  * logger. */
 
 typedef enum {
-    UA_LOGLEVEL_TRACE = 0,
-    UA_LOGLEVEL_DEBUG,
-    UA_LOGLEVEL_INFO,
-    UA_LOGLEVEL_WARNING,
-    UA_LOGLEVEL_ERROR,
-    UA_LOGLEVEL_FATAL
+    UA_LOGLEVEL_TRACE   = 100,
+    UA_LOGLEVEL_DEBUG   = 200,
+    UA_LOGLEVEL_INFO    = 300,
+    UA_LOGLEVEL_WARNING = 400,
+    UA_LOGLEVEL_ERROR   = 500,
+    UA_LOGLEVEL_FATAL   = 600
 } UA_LogLevel;
+
+#define UA_LOGCATEGORIES 10
 
 typedef enum {
     UA_LOGCATEGORY_NETWORK = 0,
@@ -44,10 +48,13 @@ typedef enum {
     UA_LOGCATEGORY_SERVER,
     UA_LOGCATEGORY_CLIENT,
     UA_LOGCATEGORY_USERLAND,
-    UA_LOGCATEGORY_SECURITYPOLICY
+    UA_LOGCATEGORY_SECURITYPOLICY,
+    UA_LOGCATEGORY_EVENTLOOP,
+    UA_LOGCATEGORY_PUBSUB,
+    UA_LOGCATEGORY_DISCOVERY
 } UA_LogCategory;
 
-typedef struct {
+typedef struct UA_Logger {
     /* Log a message. The message string and following varargs are formatted
      * according to the rules of the printf command. Use the convenience macros
      * below that take the minimum log level defined in ua_config.h into
@@ -57,7 +64,7 @@ typedef struct {
 
     void *context; /* Logger state */
 
-    void (*clear)(void *context); /* Clean up the logger plugin */
+    void (*clear)(struct UA_Logger *logger); /* Clean up the logger plugin */
 } UA_Logger;
 
 static UA_INLINE UA_FORMAT(3,4) void

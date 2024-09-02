@@ -7,6 +7,8 @@
 #include <open62541/client_config_default.h>
 #include <open62541/client_highlevel.h>
 #include <check.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include "thread_wrapper.h"
 #include "deviceObjectType.h"
 #include "mt_testing.h"
@@ -20,6 +22,7 @@
 static void setup(void) {
     tc.running = true;
     tc.server = UA_Server_new();
+    ck_assert(tc.server != NULL);
     UA_ServerConfig_setDefault(UA_Server_getConfig(tc.server));
     defineObjectTypes();
     addPumpTypeConstructor(tc.server);
@@ -76,8 +79,6 @@ void server_deleteObject(void* value){
 
 static
 void initTest(void) {
-    initThreadContext(NUMBER_OF_WORKERS, NUMBER_OF_CLIENTS, checkServer);
-
     for (size_t i = 0; i < tc.numberOfWorkers; i++) {
         setThreadContext(&tc.workerContext[i], i, ITERATIONS_PER_WORKER, server_addObject);
     }
@@ -95,7 +96,6 @@ END_TEST
 static Suite* testSuite_immutableNodes(void) {
     Suite *s = suite_create("Multithreading");
     TCase *valueCallback = tcase_create("Add-Delete nodes");
-    initTest();
     tcase_add_checked_fixture(valueCallback, setup, teardown);
     tcase_add_test(valueCallback, addDeleteObjectTypeNodes);
     suite_add_tcase(s,valueCallback);
@@ -106,7 +106,12 @@ int main(void) {
     Suite *s = testSuite_immutableNodes();
     SRunner *sr = srunner_create(s);
     srunner_set_fork_status(sr, CK_NOFORK);
+
+    createThreadContext(NUMBER_OF_WORKERS, NUMBER_OF_CLIENTS, checkServer);
+    initTest();
     srunner_run_all(sr, CK_NORMAL);
+    deleteThreadContext();
+
     int number_failed = srunner_ntests_failed(sr);
     srunner_free(sr);
     return (number_failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;

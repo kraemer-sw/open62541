@@ -62,16 +62,18 @@ def getNodeidTypeAndId(nodeId):
         return "UA_NODEIDTYPE_STRING, {{ .string = UA_STRING_STATIC(\"{id}\") }}".format(id=strId.replace("\"", "\\\""))
 
 class CGenerator(object):
-    def __init__(self, parser, inname, outfile, is_internal_types, namespaceMap):
+    def __init__(self, parser, inname, outfile, is_internal_types, gen_doc, namespaceMap):
         self.parser = parser
         self.inname = inname
         self.outfile = outfile
         self.is_internal_types = is_internal_types
+        self.gen_doc = gen_doc
         self.filtered_types = None
         self.namespaceMap = namespaceMap
         self.fh = None
         self.ff = None
         self.fc = None
+        self.fd = None
         self.fe = None
 
     @staticmethod
@@ -129,8 +131,8 @@ class CGenerator(object):
         raise RuntimeError("Unknown datatype")
 
     def print_datatype(self, datatype, namespaceMap):
-        typeid = "{%s, %s}" % (namespaceMap[datatype.namespaceUri], getNodeidTypeAndId(datatype.nodeId))
-        binaryEncodingId = "{%s, %s}" % (namespaceMap[datatype.namespaceUri],
+        typeid = "{%s, %s}" % ("0", getNodeidTypeAndId(datatype.nodeId))
+        binaryEncodingId = "{%s, %s}" % ("0",
                                          getNodeidTypeAndId(datatype.binaryEncodingId))
         idName = makeCIdentifier(datatype.name)
         pointerfree = "true" if datatype.pointerfree else "false"
@@ -234,6 +236,8 @@ class CGenerator(object):
                 idName, idName, self.print_datatype_ptr(datatype))
         funcs += "static UA_INLINE void\nUA_%s_delete(UA_%s *p) {\n    UA_delete(p, %s);\n}" % (
             idName, idName, self.print_datatype_ptr(datatype))
+        funcs += "static UA_INLINE UA_Boolean\nUA_%s_equal(const UA_%s *p1, const UA_%s *p2) {\n    return (UA_order(p1, p2, %s) == UA_ORDER_EQ);\n}\n\n" % (
+            idName, idName, idName, self.print_datatype_ptr(datatype))
         return funcs
 
     def print_datatype_encoding(self, datatype):
@@ -245,23 +249,29 @@ class CGenerator(object):
             list(itertools.chain(*itertools.repeat([idName, idName, self.print_datatype_ptr(datatype)], 3))))
 
     @staticmethod
-    def print_enum_typedef(enum):
+    def print_enum_typedef(enum, gen_doc=False):
         if sys.version_info[0] < 3:
             values = enum.elements.iteritems()
         else:
             values = enum.elements.items()
 
         if enum.isOptionSet == True:
-            return "typedef " + enum.strDataType + " " + makeCIdentifier("UA_" + enum.name) + ";\n\n" + "\n".join(
-                map(lambda kv: "#define " + makeCIdentifier("UA_" + enum.name.upper() + "_" + kv[0].upper()) +
-                " " + kv[1], values))
+            elements = map(lambda kv: "#define " + makeCIdentifier("UA_" + enum.name.upper() + "_" + kv[0].upper()) + " " + kv[1], values)
+            return "typedef " + enum.strDataType + " " + makeCIdentifier("UA_" + enum.name) + ";\n\n" + "\n".join(elements)
         else:
-            return "typedef enum {\n    " + ",\n    ".join(
-                map(lambda kv: makeCIdentifier("UA_" + enum.name.upper() + "_" + kv[0].upper()) +
-                               " = " + kv[1], values)) + \
-                   "{}\n    __UA_{}_FORCE32BIT = 0x7fffffff\n".format("," if len(enum.elements) != 0 else "", makeCIdentifier(enum.name.upper())) + "} " + \
-                   "UA_{0};\nUA_STATIC_ASSERT(sizeof(UA_{0}) == sizeof(UA_Int32), enum_must_be_32bit);".format(
-                       makeCIdentifier(enum.name))
+            elements = [makeCIdentifier("UA_" + enum.name.upper() + "_" + kv[0].upper()) + " = " + kv[1] for kv in values]
+            if not gen_doc:
+                elements.append("__UA_{}_FORCE32BIT = 0x7fffffff".format(makeCIdentifier(enum.name.upper())))
+            out = []
+            out.append("typedef enum {")
+            for i,e in enumerate(elements):
+                out.append("    " + e)
+                if i < len(elements)-1:
+                    out[-1] += ","
+            out.append("}} UA_{0};".format(makeCIdentifier(enum.name)))
+            if not gen_doc:
+                out.append("\nUA_STATIC_ASSERT(sizeof(UA_{0}) == sizeof(UA_Int32), enum_must_be_32bit);".format(makeCIdentifier(enum.name)))
+            return "\n".join(out)
 
     @staticmethod
     def print_struct_typedef(struct):
@@ -320,9 +330,9 @@ class CGenerator(object):
             return returnstr + "} UA_%s;" % makeCIdentifier(struct.name)
 
     @staticmethod
-    def print_datatype_typedef(datatype):
+    def print_datatype_typedef(datatype, gen_doc=False):
         if isinstance(datatype, EnumerationType):
-            return CGenerator.print_enum_typedef(datatype)
+            return CGenerator.print_enum_typedef(datatype, gen_doc)
         if isinstance(datatype, OpaqueType):
             return "typedef UA_" + datatype.base_type + " UA_%s;" % datatype.name
         if isinstance(datatype, StructType):
@@ -344,6 +354,11 @@ class CGenerator(object):
         self.ff.close()
         self.fc.close()
 
+        if self.gen_doc:
+            self.fd = open(self.outfile + "_generated.rst", 'w')
+            self.print_doc()
+            self.fd.close()
+
     def printh(self, string):
         print(string, end='\n', file=self.fh)
 
@@ -352,6 +367,9 @@ class CGenerator(object):
 
     def printc(self, string):
         print(string, end='\n', file=self.fc)
+
+    def printd(self, string):
+        print(string, end='\n', file=self.fd)
 
     def iter_types(self, v):
         # Make a copy. We cannot delete from the map that is iterated over at
@@ -402,20 +420,18 @@ class CGenerator(object):
  * Autogenerated -- do not modify *
  **********************************/
 
+/* Must be before the include guards */
+#ifdef UA_ENABLE_AMALGAMATION
+# include "open62541.h"
+#else
+# include <open62541/types.h>
+#endif
+
 #ifndef ''' + self.parser.outname.upper() + '''_GENERATED_H_
 #define ''' + self.parser.outname.upper() + '''_GENERATED_H_
 
-#ifdef UA_ENABLE_AMALGAMATION
-#include "open62541.h"
-#else
-#include <open62541/types.h>
-''' + ('#include <open62541/types_generated.h>\n' if self.parser.outname != "types" else '') + '''
-#endif
-
 ''' + (additionalHeaders) + '''
-
 _UA_BEGIN_DECLS
-
 ''')
 
         self.printh('''/**
@@ -430,17 +446,15 @@ _UA_BEGIN_DECLS
         if totalCount > 0:
 
             self.printh(
-                "extern UA_EXPORT const UA_DataType UA_" + self.parser.outname.upper() + "[UA_" + self.parser.outname.upper() + "_COUNT];")
+                "extern UA_EXPORT UA_DataType UA_" + self.parser.outname.upper() + "[UA_" + self.parser.outname.upper() + "_COUNT];")
 
             for ns in self.filtered_types:
                 for i, t_name in enumerate(self.filtered_types[ns]):
                     t = self.filtered_types[ns][t_name]
-                    self.printh("\n/**\n * " + t.name)
-                    self.printh(" * " + "^" * len(t.name))
                     if t.description == "":
-                        self.printh(" */")
+                        self.printh("\n/* " + t.name + " */")
                     else:
-                        self.printh(" * " + t.description + " */")
+                        self.printh("\n/* " + t.name + ": " + t.description + " */")
                     if not isinstance(t, BuiltinType):
                         self.printh(self.print_datatype_typedef(t) + "\n")
                     self.printh(
@@ -453,6 +467,21 @@ _UA_BEGIN_DECLS
 _UA_END_DECLS
 
 #endif /* %s_GENERATED_H_ */''' % self.parser.outname.upper())
+
+    def print_doc(self):
+        for ns in self.filtered_types:
+            for i, t_name in enumerate(self.filtered_types[ns]):
+                t = self.filtered_types[ns][t_name]
+                if isinstance(t, BuiltinType):
+                    continue
+                self.printd(t.name)
+                self.printd("^" * len(t.name))
+                self.printd(t.description)
+                self.printd(".. code-block:: c\n")
+                lines = self.print_datatype_typedef(t, True)
+                for l in lines.splitlines():
+                    self.printd("    " + l)
+                self.printd("")
 
     def print_handling(self):
         self.printf(u'''/**********************************
@@ -506,7 +535,7 @@ _UA_END_DECLS
 
         if totalCount > 0:
             self.printc(
-                "const UA_DataType UA_%s[UA_%s_COUNT] = {" % (self.parser.outname.upper(), self.parser.outname.upper()))
+                "UA_DataType UA_%s[UA_%s_COUNT] = {" % (self.parser.outname.upper(), self.parser.outname.upper()))
 
             for ns in self.filtered_types:
                 for i, t_name in enumerate(self.filtered_types[ns]):

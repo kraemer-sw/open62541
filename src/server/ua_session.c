@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. 
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
  *    Copyright 2018 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2018 (c) Thomas Stalder, Blue Time Concept SA
@@ -8,6 +8,7 @@
  */
 
 #include "ua_session.h"
+#include "open62541/types.h"
 #include "ua_server_internal.h"
 #ifdef UA_ENABLE_SUBSCRIPTIONS
 #include "ua_subscription.h"
@@ -43,6 +44,7 @@ void UA_Session_clear(UA_Session *session, UA_Server* server) {
     UA_Session_detachFromSecureChannel(session);
     UA_ApplicationDescription_clear(&session->clientDescription);
     UA_NodeId_clear(&session->header.authenticationToken);
+    UA_String_clear(&session->clientUserIdOfSession);
     UA_NodeId_clear(&session->sessionId);
     UA_String_clear(&session->sessionName);
     UA_ByteString_clear(&session->serverNonce);
@@ -54,10 +56,8 @@ void UA_Session_clear(UA_Session *session, UA_Server* server) {
     session->continuationPoints = NULL;
     session->availableContinuationPoints = UA_MAXCONTINUATIONPOINTS;
 
-    UA_Array_delete(session->params, session->paramsSize,
-                    &UA_TYPES[UA_TYPES_KEYVALUEPAIR]);
-    session->params = NULL;
-    session->paramsSize = 0;
+    UA_KeyValueMap_delete(session->attributes);
+    session->attributes = NULL;
 
     UA_Array_delete(session->localeIds, session->localeIdsSize,
                     &UA_TYPES[UA_TYPES_STRING]);
@@ -168,7 +168,7 @@ UA_Session_detachSubscription(UA_Server *server, UA_Session *session,
 
     /* Reduce the number of outstanding retransmissions */
     session->totalRetransmissionQueueSize -= sub->retransmissionQueueSize;
-    
+
     /* Send remaining publish responses if the last subscription was removed */
     if(!releasePublishResponses || !TAILQ_EMPTY(&session->subscriptions))
         return;
@@ -176,7 +176,6 @@ UA_Session_detachSubscription(UA_Server *server, UA_Session *session,
     while((pre = UA_Session_dequeuePublishReq(session))) {
         UA_PublishResponse *response = &pre->response;
         response->responseHeader.serviceResult = UA_STATUSCODE_BADNOSUBSCRIPTION;
-        response->responseHeader.timestamp = UA_DateTime_now();
         sendResponse(server, session, session->header.channel, pre->requestId,
                      (UA_Response*)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
         UA_PublishResponse_clear(response);
@@ -198,7 +197,7 @@ UA_Session_getSubscriptionById(UA_Session *session, UA_UInt32 subscriptionId) {
 }
 
 UA_Subscription *
-UA_Server_getSubscriptionById(UA_Server *server, UA_UInt32 subscriptionId) {
+getSubscriptionById(UA_Server *server, UA_UInt32 subscriptionId) {
     UA_Subscription *sub;
     LIST_FOREACH(sub, &server->subscriptions, serverListEntry) {
         /* Prevent lookup of subscriptions that are to be deleted with a statuschange */
@@ -212,7 +211,7 @@ UA_Server_getSubscriptionById(UA_Server *server, UA_UInt32 subscriptionId) {
 
 UA_PublishResponseEntry*
 UA_Session_dequeuePublishReq(UA_Session *session) {
-    UA_PublishResponseEntry* entry = SIMPLEQ_FIRST(&session->responseQueue);
+    UA_PublishResponseEntry *entry = SIMPLEQ_FIRST(&session->responseQueue);
     if(entry) {
         SIMPLEQ_REMOVE_HEAD(&session->responseQueue, listEntry);
         session->responseQueueSize--;
@@ -241,7 +240,7 @@ UA_Server_closeSession(UA_Server *server, const UA_NodeId *sessionId) {
     UA_StatusCode res = UA_STATUSCODE_BADSESSIONIDINVALID;
     LIST_FOREACH(entry, &server->sessions, pointers) {
         if(UA_NodeId_equal(&entry->session.sessionId, sessionId)) {
-            UA_Server_removeSession(server, entry, UA_DIAGNOSTICEVENT_CLOSE);
+            UA_Server_removeSession(server, entry, UA_SHUTDOWNREASON_CLOSE);
             res = UA_STATUSCODE_GOOD;
             break;
         }
@@ -250,108 +249,146 @@ UA_Server_closeSession(UA_Server *server, const UA_NodeId *sessionId) {
     return res;
 }
 
+/* Session Attributes */
+
+#define UA_PROTECTEDATTRIBUTESSIZE 4
+static const UA_QualifiedName protectedAttributes[UA_PROTECTEDATTRIBUTESSIZE] = {
+    {0, UA_STRING_STATIC("localeIds")},
+    {0, UA_STRING_STATIC("clientDescription")},
+    {0, UA_STRING_STATIC("sessionName")},
+    {0, UA_STRING_STATIC("clientUserId")}
+};
+
+static UA_Boolean
+protectedAttribute(const UA_QualifiedName key) {
+    for(size_t i = 0; i < UA_PROTECTEDATTRIBUTESSIZE; i++) {
+        if(UA_QualifiedName_equal(&key, &protectedAttributes[i]))
+            return true;
+    }
+    return false;
+}
+
 UA_StatusCode
-UA_Server_setSessionParameter(UA_Server *server, const UA_NodeId *sessionId,
-                              const char *name, const UA_Variant *parameter) {
+UA_Server_setSessionAttribute(UA_Server *server, const UA_NodeId *sessionId,
+                              const UA_QualifiedName key, const UA_Variant *value) {
+    if(protectedAttribute(key))
+        return UA_STATUSCODE_BADNOTWRITABLE;
     UA_LOCK(&server->serviceMutex);
-    UA_Session *session = UA_Server_getSessionById(server, sessionId);
+    UA_Session *session = getSessionById(server, sessionId);
     UA_StatusCode res = UA_STATUSCODE_BADSESSIONIDINVALID;
     if(session)
-        res = UA_KeyValueMap_set(&session->params, &session->paramsSize,
-                                 name, parameter);
-    UA_UNLOCK(&server->serviceMutex);
-    return res;
-}
-
-void
-UA_Server_deleteSessionParameter(UA_Server *server, const UA_NodeId *sessionId,
-                                 const char *name) {
-    UA_LOCK(&server->serviceMutex);
-    UA_Session *session = UA_Server_getSessionById(server, sessionId);
-    if(session)
-        UA_KeyValueMap_delete(&session->params, &session->paramsSize, name);
-    UA_UNLOCK(&server->serviceMutex);
-}
-
-UA_StatusCode
-UA_Server_getSessionParameter(UA_Server *server, const UA_NodeId *sessionId,
-                              const char *name, UA_Variant *outParameter) {
-    UA_LOCK(&server->serviceMutex);
-    if(!outParameter) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    UA_Session *session = UA_Server_getSessionById(server, sessionId);
-    if(!session) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADSESSIONIDINVALID;
-    }
-
-    const UA_Variant *param =
-        UA_KeyValueMap_get(session->params, session->paramsSize, name);
-    if(!param) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNOTFOUND;
-    }
-
-    UA_StatusCode res = UA_Variant_copy(param, outParameter);
+        res = UA_KeyValueMap_set(session->attributes,
+                                 key, value);
     UA_UNLOCK(&server->serviceMutex);
     return res;
 }
 
 UA_StatusCode
-UA_Server_getSessionScalarParameter(UA_Server *server, const UA_NodeId *sessionId,
-                                    const char *name, const UA_DataType *type,
-                                    UA_Variant *outParameter) {
+UA_Server_deleteSessionAttribute(UA_Server *server, const UA_NodeId *sessionId,
+                                 const UA_QualifiedName key) {
+    if(protectedAttribute(key))
+        return UA_STATUSCODE_BADNOTWRITABLE;
     UA_LOCK(&server->serviceMutex);
-    if(!outParameter) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADINTERNALERROR;
-    }
-
-    UA_Session *session = UA_Server_getSessionById(server, sessionId);
+    UA_Session *session = getSessionById(server, sessionId);
     if(!session) {
         UA_UNLOCK(&server->serviceMutex);
         return UA_STATUSCODE_BADSESSIONIDINVALID;
     }
+    UA_StatusCode res =
+        UA_KeyValueMap_remove(session->attributes, key);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
 
-    const UA_Variant *param =
-        UA_KeyValueMap_get(session->params, session->paramsSize, name);
-    if(!param || !UA_Variant_hasScalarType(param, type)) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADNOTFOUND;
+static UA_StatusCode
+getSessionAttribute(UA_Server *server, const UA_NodeId *sessionId,
+                    const UA_QualifiedName key, UA_Variant *outValue,
+                    UA_Boolean copy) {
+    if(!outValue)
+        return UA_STATUSCODE_BADINTERNALERROR;
+
+    UA_Session *session = getSessionById(server, sessionId);
+    if(!session)
+        return UA_STATUSCODE_BADSESSIONIDINVALID;
+
+    const UA_Variant *attr;
+    UA_Variant localAttr;
+
+    if(UA_QualifiedName_equal(&key, &protectedAttributes[0])) {
+        /* Return LocaleIds */
+        UA_Variant_setArray(&localAttr, session->localeIds,
+                            session->localeIdsSize, &UA_TYPES[UA_TYPES_STRING]);
+        attr = &localAttr;
+    } else if(UA_QualifiedName_equal(&key, &protectedAttributes[1])) {
+        /* Return client description */
+        UA_Variant_setScalar(&localAttr, &session->clientDescription,
+                             &UA_TYPES[UA_TYPES_APPLICATIONDESCRIPTION]);
+        attr = &localAttr;
+    } else if(UA_QualifiedName_equal(&key, &protectedAttributes[2])) {
+        /* Return session name */
+        UA_Variant_setScalar(&localAttr, &session->sessionName,
+                             &UA_TYPES[UA_TYPES_STRING]);
+        attr = &localAttr;
+    } else if(UA_QualifiedName_equal(&key, &protectedAttributes[3])) {
+        /* Return client user id */
+        UA_Variant_setScalar(&localAttr, &session->clientUserIdOfSession,
+                             &UA_TYPES[UA_TYPES_STRING]);
+        attr = &localAttr;
+    } else {
+        /* Get from the actual key-value list */
+        attr = UA_KeyValueMap_get(session->attributes, key);
+        if(!attr)
+            return UA_STATUSCODE_BADNOTFOUND;
     }
 
-    UA_StatusCode res = UA_Variant_copy(param, outParameter);
+    if(copy)
+        return UA_Variant_copy(attr, outValue);
+
+    *outValue = *attr;
+    outValue->storageType = UA_VARIANT_DATA_NODELETE;
+    return UA_STATUSCODE_GOOD;
+}
+
+UA_StatusCode
+UA_Server_getSessionAttribute(UA_Server *server, const UA_NodeId *sessionId,
+                              const UA_QualifiedName key, UA_Variant *outValue) {
+    UA_LOCK(&server->serviceMutex);
+    UA_StatusCode res = getSessionAttribute(server, sessionId, key, outValue, false);
     UA_UNLOCK(&server->serviceMutex);
     return res;
 }
 
 UA_StatusCode
-UA_Server_getSessionArrayParameter(UA_Server *server, const UA_NodeId *sessionId,
-                                   const char *name, const UA_DataType *type,
-                                   UA_Variant *outParameter) {
+UA_Server_getSessionAttributeCopy(UA_Server *server, const UA_NodeId *sessionId,
+                                  const UA_QualifiedName key, UA_Variant *outValue) {
     UA_LOCK(&server->serviceMutex);
-    if(!outParameter) {
+    UA_StatusCode res = getSessionAttribute(server, sessionId, key, outValue, true);
+    UA_UNLOCK(&server->serviceMutex);
+    return res;
+}
+
+UA_StatusCode
+UA_Server_getSessionAttribute_scalar(UA_Server *server,
+                                     const UA_NodeId *sessionId,
+                                     const UA_QualifiedName key,
+                                     const UA_DataType *type,
+                                     void *outValue) {
+    UA_LOCK(&server->serviceMutex);
+
+    UA_Variant attr;
+    UA_StatusCode res = getSessionAttribute(server, sessionId, key, &attr, false);
+    if(res != UA_STATUSCODE_GOOD) {
         UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADINTERNALERROR;
+        return res;
     }
 
-    UA_Session *session = UA_Server_getSessionById(server, sessionId);
-    if(!session) {
-        UA_UNLOCK(&server->serviceMutex);
-        return UA_STATUSCODE_BADSESSIONIDINVALID;
-    }
-
-    const UA_Variant *param =
-        UA_KeyValueMap_get(session->params, session->paramsSize, name);
-    if(!param || !UA_Variant_hasArrayType(param, type)) {
+    if(!UA_Variant_hasScalarType(&attr, type)) {
         UA_UNLOCK(&server->serviceMutex);
         return UA_STATUSCODE_BADNOTFOUND;
     }
 
-    UA_StatusCode res = UA_Variant_copy(param, outParameter);
+    memcpy(outValue, attr.data, type->memSize);
+
     UA_UNLOCK(&server->serviceMutex);
-    return res;
+    return UA_STATUSCODE_GOOD;
 }

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -21,6 +21,14 @@ parser.add_argument('-c', '--type-csv',
                     action='append',
                     default=[],
                     help='csv file with type descriptions')
+
+parser.add_argument('-x', '--xml',
+                    metavar="<nodeSetXML>",
+                    type=argparse.FileType('rb'),
+                    action='append',
+                    dest="type_xml",
+                    default=[],
+                    help='NodeSet XML file.')
 
 parser.add_argument('--namespaceMap',
                     metavar="<namespaceMap>",
@@ -57,6 +65,11 @@ parser.add_argument('--internal',
                     dest="internal",
                     help='Given bsd are internal types which do not have any .csv file')
 
+parser.add_argument('--gen-doc',
+                    action='store_true',
+                    dest="gen_doc",
+                    help='Generate a .rst documentation version of the type definition')
+
 parser.add_argument('-t', '--type-bsd',
                     metavar="<typeBsds>",
                     type=argparse.FileType('r'),
@@ -91,8 +104,8 @@ for m in args.namespace_map:
 
 
 parser = CSVBSDTypeParser(args.opaque_map, args.selected_types, args.no_builtin, outname, args.import_bsd,
-                          args.type_bsd, args.type_csv, namespaceMap)
+                          args.type_bsd, args.type_csv, args.type_xml, namespaceMap)
 parser.create_types()
 
-generator = backend.CGenerator(parser, inname, args.outfile, args.internal, namespaceMap)
+generator = backend.CGenerator(parser, inname, args.outfile, args.internal, args.gen_doc, namespaceMap)
 generator.write_definitions()

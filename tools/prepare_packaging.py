@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -16,7 +16,7 @@ import shutil
 dirpath = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)),".."))
 debian_path = os.path.join(dirpath, "tools/packaging/debian")
 target_debian_path = os.path.join(dirpath, "debian")
-shutil.copytree(debian_path, target_debian_path)
+shutil.copytree(debian_path, target_debian_path, ignore=shutil.ignore_patterns('*-template'))
 
 # Unpack the library version from the git information
 git_describe_version = subprocess.check_output(["git", "describe", "--tags", "--dirty", "--match", "v*"]).decode('utf-8').strip()
@@ -29,7 +29,7 @@ git_describe_version = subprocess.check_output(["git", "describe", "--tags", "--
 # v1.2.3-5-g4538abcd-dirty
 # git_describe_version = "v1.2.3"
 
-m = re.match(r"^v([0-9]+)(\.[0-9]+)?(\.[0-9]+)?(-(.*)+)?$", git_describe_version)
+m = re.match(r"^v([0-9]{1,4})(\.[0-9]{1,4})?(\.[0-9]{1,4})?(-(.*){1,100})?$", git_describe_version)
 version_major = m.group(1) if m.group(1) is not None else "0"
 version_minor = m.group(2).replace(".", "") if m.group(2) is not None else "0"
 version_patch = m.group(3).replace(".", "") if m.group(3) is not None else "0"
@@ -79,40 +79,16 @@ with open(control_file, 'r+') as f:
 
 # rename the install template to match the soname
 install_file_template = os.path.join(debian_path, "libopen62541.install-template")
-install_file = os.path.join(target_debian_path,
-                  "libopen62541-{}.{}.install".format(version_major, version_minor))
+install_file = os.path.join(target_debian_path, "libopen62541-{}.{}.install".format(version_major, version_minor))
 shutil.copy(install_file_template, install_file)
 
 install_file_template = os.path.join(debian_path, "libopen62541-dev.install-template")
-install_file = os.path.join(target_debian_path,
-                  "libopen62541-{}.{}-dev.install".format(version_major, version_minor))
+install_file = os.path.join(target_debian_path, "libopen62541-{}.{}-dev.install".format(version_major, version_minor))
 shutil.copy(install_file_template, install_file)
 
 install_file_template = os.path.join(debian_path, "libopen62541-tools.install-template")
-install_file = os.path.join(target_debian_path,
-                  "libopen62541-{}.{}-tools.install".format(version_major, version_minor))
+install_file = os.path.join(target_debian_path, "libopen62541-{}.{}-tools.install".format(version_major, version_minor))
 shutil.copy(install_file_template, install_file)
-
-install_file_template = os.path.join(debian_path, "libopen62541-doc.doc-base-template")
-install_file = os.path.join(target_debian_path,
-                  "libopen62541-{}.{}-doc.doc-base".format(version_major, version_minor))
-shutil.copy(install_file_template, install_file)
-
-install_file_template = os.path.join(debian_path, "libopen62541-doc.install-template")
-install_file = os.path.join(target_debian_path,
-                  "libopen62541-{}.{}-doc.install".format(version_major, version_minor))
-shutil.copy(install_file_template, install_file)
-
-# Create rule file and replace template variables
-rule_file_template = os.path.join(debian_path, "rules-template")
-rule_file = os.path.join(target_debian_path, "rules")
-shutil.copy(rule_file_template, rule_file)
-with open(rule_file, 'r+') as f:
-    content = f.read()
-    f.seek(0)
-    f.truncate()
-    content = content.replace('<srcdir>', "{}".format(dirpath))
-    f.write(content)
 
 # Update CMakeLists.txt to include full version string
 with open(os.path.join(dirpath,"CMakeLists.txt"), 'r+') as f:
@@ -120,6 +96,6 @@ with open(os.path.join(dirpath,"CMakeLists.txt"), 'r+') as f:
     f.seek(0)
     f.truncate()
     for idx, line in enumerate(lines):
-        if idx == 2:
+        if idx == 1:
             f.write('set(OPEN62541_VERSION "{}")\n'.format(git_describe_version))
         f.write(line)

@@ -13,6 +13,7 @@
 #define UA_COMMON_H_
 
 #include <open62541/config.h>
+#include <open62541/nodeids.h>
 
 _UA_BEGIN_DECLS
 
@@ -60,6 +61,8 @@ typedef enum {
 } UA_AttributeId;
 
 /**
+ * .. _access-level-mask:
+ *
  * Access Level Masks
  * ------------------
  * The access level to a node is given by the following constants that are ANDed
@@ -74,6 +77,8 @@ typedef enum {
 #define UA_ACCESSLEVELMASK_TIMESTAMPWRITE (0x01u << 6u)
 
 /**
+ * .. _write-mask:
+ *
  * Write Masks
  * -----------
  * The write mask and user write mask is given by the following constants that
@@ -101,10 +106,13 @@ typedef enum {
 #define UA_WRITEMASK_VALUERANK               (0x01u << 19u)
 #define UA_WRITEMASK_WRITEMASK               (0x01u << 20u)
 #define UA_WRITEMASK_VALUEFORVARIABLETYPE    (0x01u << 21u)
+#define UA_WRITEMASK_ACCESSLEVELEX           (0x01u << 25u)
 
 /**
- * ValueRanks
- * ----------
+ * .. _valuerank-defines:
+ *
+ * ValueRank
+ * ---------
  * The following are the most common ValueRanks used for Variables,
  * VariableTypes and method arguments. ValueRanks higher than 3 are valid as
  * well (but less common). */
@@ -118,6 +126,8 @@ typedef enum {
 #define UA_VALUERANK_THREE_DIMENSIONS          3
 
 /**
+ * .. _eventnotifier:
+ *
  * EventNotifier
  * -------------
  * The following are the available EventNotifier used for Nodes.
@@ -165,7 +175,23 @@ typedef enum {
  * ---------------- */
 
 typedef enum {
-    UA_SECURECHANNELSTATE_FRESH = 0,
+    UA_CONNECTIONSTATE_CLOSED,     /* The socket has been closed and the connection
+                                    * will be deleted */
+    UA_CONNECTIONSTATE_OPENING,    /* The socket is open, but the HEL/ACK handshake
+                                    * is not done */
+    UA_CONNECTIONSTATE_ESTABLISHED,/* The socket is open and the connection
+                                    * configured */
+    UA_CONNECTIONSTATE_CLOSING     /* The socket is closing down */
+} UA_ConnectionState;
+
+
+typedef enum {
+    UA_SECURECHANNELSTATE_CLOSED = 0,
+    UA_SECURECHANNELSTATE_REVERSE_LISTENING,
+    UA_SECURECHANNELSTATE_CONNECTING,
+    UA_SECURECHANNELSTATE_CONNECTED,
+    UA_SECURECHANNELSTATE_REVERSE_CONNECTED,
+    UA_SECURECHANNELSTATE_RHE_SENT,
     UA_SECURECHANNELSTATE_HEL_SENT,
     UA_SECURECHANNELSTATE_HEL_RECEIVED,
     UA_SECURECHANNELSTATE_ACK_SENT,
@@ -173,11 +199,10 @@ typedef enum {
     UA_SECURECHANNELSTATE_OPN_SENT,
     UA_SECURECHANNELSTATE_OPEN,
     UA_SECURECHANNELSTATE_CLOSING,
-    UA_SECURECHANNELSTATE_CLOSED
 } UA_SecureChannelState;
 
 typedef enum {
-    UA_SESSIONSTATE_CLOSED,
+    UA_SESSIONSTATE_CLOSED = 0,
     UA_SESSIONSTATE_CREATE_REQUESTED,
     UA_SESSIONSTATE_CREATED,
     UA_SESSIONSTATE_ACTIVATE_REQUESTED,
@@ -186,27 +211,24 @@ typedef enum {
 } UA_SessionState;
 
 /**
- * Statistic counters
+ * Statistic Counters
  * ------------------
  *
- * The stack manages statistic counters for the following layers:
+ * The stack manages statistic counters for SecureChannels and Sessions.
  *
- * - Network
- * - Secure channel
- * - Session
- *
- * The session layer counters are matching the counters of the
+ * The Session layer counters are matching the counters of the
  * ServerDiagnosticsSummaryDataType that are defined in the OPC UA Part 5
- * specification. Counters of the other layers are not specified by OPC UA but
- * are harmonized with the session layer counters if possible. */
+ * specification. The SecureChannel counters are not defined in the OPC UA spec,
+ * but are harmonized with the Session layer counters if possible. */
 
-typedef struct {
-    size_t currentConnectionCount;
-    size_t cumulatedConnectionCount;
-    size_t rejectedConnectionCount;
-    size_t connectionTimeoutCount;
-    size_t connectionAbortCount;
-} UA_NetworkStatistics;
+typedef enum {
+    UA_SHUTDOWNREASON_CLOSE = 0,
+    UA_SHUTDOWNREASON_REJECT,
+    UA_SHUTDOWNREASON_SECURITYREJECT,
+    UA_SHUTDOWNREASON_TIMEOUT,
+    UA_SHUTDOWNREASON_ABORT,
+    UA_SHUTDOWNREASON_PURGE
+} UA_ShutdownReason;
 
 typedef struct {
     size_t currentChannelCount;
@@ -225,6 +247,36 @@ typedef struct {
     size_t sessionTimeoutCount;          /* only used by servers */
     size_t sessionAbortCount;            /* only used by servers */
 } UA_SessionStatistics;
+
+/**
+ * Lifecycle States
+ * ----------------
+ *
+ * Generic lifecycle states. The STOPPING state indicates that the lifecycle is
+ * being terminated. But it might take time to (asynchronously) perform a
+ * graceful shutdown. */
+
+typedef enum {
+    UA_LIFECYCLESTATE_STOPPED = 0,
+    UA_LIFECYCLESTATE_STARTED,
+    UA_LIFECYCLESTATE_STOPPING
+} UA_LifecycleState;
+
+/**
+ * Forward Declarations
+ * --------------------
+ * Opaque pointers used in Client, Server and PubSub. */
+
+struct UA_Server;
+typedef struct UA_Server UA_Server;
+
+struct UA_ServerConfig;
+typedef struct UA_ServerConfig UA_ServerConfig;
+
+typedef void (*UA_ServerCallback)(UA_Server *server, void *data);
+
+struct UA_Client;
+typedef struct UA_Client UA_Client;
 
 /**
  * .. include:: util.rst */

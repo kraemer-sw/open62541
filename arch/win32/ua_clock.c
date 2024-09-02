@@ -1,18 +1,14 @@
 /* This work is licensed under a Creative Commons CCZero 1.0 Universal License.
- * See http://creativecommons.org/publicdomain/zero/1.0/ for more information. 
+ * See http://creativecommons.org/publicdomain/zero/1.0/ for more information.
  *
  *    Copyright 2016-2017 (c) Julius Pfrommer, Fraunhofer IOSB
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
  *    Copyright 2017 (c) Thomas Stalder
  */
 
-#ifdef UA_ARCHITECTURE_WIN32
-
-#ifndef _BSD_SOURCE
-# define _BSD_SOURCE
-#endif
-
 #include <open62541/types.h>
+
+#ifdef UA_ARCHITECTURE_WIN32
 
 #include <time.h>
 /* Backup definition of SLIST_ENTRY on mingw winnt.h */
@@ -50,7 +46,7 @@ UA_Int64 UA_DateTime_localTimeUtcOffset(void) {
     gmtime_s(&rawtime, &ptm);
 #else
     gmtime_s(&ptm, &rawtime);
-#endif    
+#endif
     // Request that mktime() looksup dst in timezone database
     ptm.tm_isdst = -1;
     gmt = mktime(&ptm);

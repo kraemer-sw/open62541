@@ -11,11 +11,13 @@
 #include "tests/namespace_tests_di_generated.h"
 #include "tests/namespace_tests_autoid_generated.h"
 #include "unistd.h"
+#include <stdlib.h>
 
 UA_Server *server = NULL;
 
 static void setup(void) {
     server = UA_Server_new();
+    ck_assert(server != NULL);
     UA_ServerConfig_setDefault(UA_Server_getConfig(server));
     UA_Server_run_startup(server);
 }

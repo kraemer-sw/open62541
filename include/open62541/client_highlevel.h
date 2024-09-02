@@ -171,6 +171,13 @@ UA_Client_readAccessLevelAttribute(UA_Client *client, const UA_NodeId nodeId,
 }
 
 static UA_INLINE UA_StatusCode
+UA_Client_readAccessLevelExAttribute(UA_Client *client, const UA_NodeId nodeId,
+                                     UA_UInt32 *outAccessLevelEx) {
+    return __UA_Client_readAttribute(client, &nodeId, UA_ATTRIBUTEID_ACCESSLEVELEX,
+                                     outAccessLevelEx, &UA_TYPES[UA_TYPES_UINT32]);
+}
+
+static UA_INLINE UA_StatusCode
 UA_Client_readUserAccessLevelAttribute(UA_Client *client, const UA_NodeId nodeId,
                                        UA_Byte *outUserAccessLevel) {
     return __UA_Client_readAttribute(client, &nodeId,
@@ -218,60 +225,51 @@ UA_Client_readUserExecutableAttribute(UA_Client *client, const UA_NodeId nodeId,
  * The following functions can be used to read a single node historically.
  * Use the regular service to read several nodes at once. */
 
-#ifdef UA_ENABLE_HISTORIZING
 typedef UA_Boolean
-(*UA_HistoricalIteratorCallback)(UA_Client *client,
-                                 const UA_NodeId *nodeId,
-                                 UA_Boolean moreDataAvailable,
-                                 const UA_ExtensionObject *data, void *callbackContext);
-
-#ifdef UA_ENABLE_EXPERIMENTAL_HISTORIZING
-UA_StatusCode UA_EXPORT
-UA_Client_HistoryRead_events(UA_Client *client, const UA_NodeId *nodeId,
-                                const UA_HistoricalIteratorCallback callback,
-                                UA_DateTime startTime, UA_DateTime endTime,
-                                UA_String indexRange, const UA_EventFilter filter, UA_UInt32 numValuesPerNode,
-                                UA_TimestampsToReturn timestampsToReturn, void *callbackContext);
-#endif // UA_ENABLE_EXPERIMENTAL_HISTORIZING
+(*UA_HistoricalIteratorCallback)(
+    UA_Client *client, const UA_NodeId *nodeId, UA_Boolean moreDataAvailable,
+    const UA_ExtensionObject *data, void *callbackContext);
 
 UA_StatusCode UA_EXPORT
-UA_Client_HistoryRead_raw(UA_Client *client, const UA_NodeId *nodeId,
-                             const UA_HistoricalIteratorCallback callback,
-                             UA_DateTime startTime, UA_DateTime endTime,
-                             UA_String indexRange, UA_Boolean returnBounds, UA_UInt32 numValuesPerNode,
-                             UA_TimestampsToReturn timestampsToReturn, void *callbackContext);
-
-#ifdef UA_ENABLE_EXPERIMENTAL_HISTORIZING
-UA_StatusCode UA_EXPORT
-UA_Client_HistoryRead_modified(UA_Client *client, const UA_NodeId *nodeId,
-                                  const UA_HistoricalIteratorCallback callback,
-                                  UA_DateTime startTime, UA_DateTime endTime,
-                                  UA_String indexRange, UA_Boolean returnBounds, UA_UInt32 numValuesPerNode,
-                                  UA_TimestampsToReturn timestampsToReturn, void *callbackContext);
-#endif // UA_ENABLE_EXPERIMENTAL_HISTORIZING
+UA_Client_HistoryRead_events(
+    UA_Client *client, const UA_NodeId *nodeId,
+    const UA_HistoricalIteratorCallback callback, UA_DateTime startTime,
+    UA_DateTime endTime, UA_String indexRange, const UA_EventFilter filter,
+    UA_UInt32 numValuesPerNode, UA_TimestampsToReturn timestampsToReturn,
+    void *callbackContext);
 
 UA_StatusCode UA_EXPORT
-UA_Client_HistoryUpdate_insert(UA_Client *client,
-                               const UA_NodeId *nodeId,
-                               UA_DataValue *value);
+UA_Client_HistoryRead_raw(
+    UA_Client *client, const UA_NodeId *nodeId,
+    const UA_HistoricalIteratorCallback callback, UA_DateTime startTime,
+    UA_DateTime endTime, UA_String indexRange, UA_Boolean returnBounds,
+    UA_UInt32 numValuesPerNode, UA_TimestampsToReturn timestampsToReturn,
+    void *callbackContext);
 
 UA_StatusCode UA_EXPORT
-UA_Client_HistoryUpdate_replace(UA_Client *client,
-                                const UA_NodeId *nodeId,
-                                UA_DataValue *value);
+UA_Client_HistoryRead_modified(
+    UA_Client *client, const UA_NodeId *nodeId,
+    const UA_HistoricalIteratorCallback callback, UA_DateTime startTime,
+    UA_DateTime endTime, UA_String indexRange, UA_Boolean returnBounds,
+    UA_UInt32 numValuesPerNode, UA_TimestampsToReturn timestampsToReturn,
+    void *callbackContext);
 
 UA_StatusCode UA_EXPORT
-UA_Client_HistoryUpdate_update(UA_Client *client,
-                               const UA_NodeId *nodeId,
-                               UA_DataValue *value);
+UA_Client_HistoryUpdate_insert(
+    UA_Client *client, const UA_NodeId *nodeId, UA_DataValue *value);
 
 UA_StatusCode UA_EXPORT
-UA_Client_HistoryUpdate_deleteRaw(UA_Client *client,
-                                  const UA_NodeId *nodeId,
-                                  UA_DateTime startTimestamp,
-                                  UA_DateTime endTimestamp);
+UA_Client_HistoryUpdate_replace(
+    UA_Client *client, const UA_NodeId *nodeId, UA_DataValue *value);
 
-#endif // UA_ENABLE_HISTORIZING
+UA_StatusCode UA_EXPORT
+UA_Client_HistoryUpdate_update(
+    UA_Client *client, const UA_NodeId *nodeId, UA_DataValue *value);
+
+UA_StatusCode UA_EXPORT
+UA_Client_HistoryUpdate_deleteRaw(
+    UA_Client *client, const UA_NodeId *nodeId,
+    UA_DateTime startTimestamp, UA_DateTime endTimestamp);
 
 /**
  * Write Attributes
@@ -388,6 +386,22 @@ UA_Client_writeValueAttribute(UA_Client *client, const UA_NodeId nodeId,
 }
 
 static UA_INLINE UA_StatusCode
+UA_Client_writeValueAttribute_scalar(UA_Client *client, const UA_NodeId nodeId,
+                                     const void *newValue,
+                                     const UA_DataType *valueType) {
+    return __UA_Client_writeAttribute(client, &nodeId, UA_ATTRIBUTEID_VALUE,
+                                      newValue, valueType);
+}
+
+/* Write a DataValue that can include timestamps and status codes */
+static UA_INLINE UA_StatusCode
+UA_Client_writeValueAttributeEx(UA_Client *client, const UA_NodeId nodeId,
+                                const UA_DataValue *newValue) {
+    return __UA_Client_writeAttribute(client, &nodeId, UA_ATTRIBUTEID_VALUE,
+                                      newValue, &UA_TYPES[UA_TYPES_DATAVALUE]);
+}
+
+static UA_INLINE UA_StatusCode
 UA_Client_writeDataTypeAttribute(UA_Client *client, const UA_NodeId nodeId,
                                  const UA_NodeId *newDataType) {
     return __UA_Client_writeAttribute(client, &nodeId, UA_ATTRIBUTEID_DATATYPE,
@@ -411,6 +425,13 @@ UA_Client_writeAccessLevelAttribute(UA_Client *client, const UA_NodeId nodeId,
                                     const UA_Byte *newAccessLevel) {
     return __UA_Client_writeAttribute(client, &nodeId, UA_ATTRIBUTEID_ACCESSLEVEL,
                                       newAccessLevel, &UA_TYPES[UA_TYPES_BYTE]);
+}
+
+static UA_INLINE UA_StatusCode
+UA_Client_writeAccessLevelExAttribute(UA_Client *client, const UA_NodeId nodeId,
+                                      UA_UInt32 *newAccessLevelEx) {
+    return __UA_Client_writeAttribute(client, &nodeId, UA_ATTRIBUTEID_ACCESSLEVELEX,
+                                      newAccessLevelEx, &UA_TYPES[UA_TYPES_UINT32]);
 }
 
 static UA_INLINE UA_StatusCode
@@ -458,12 +479,11 @@ UA_Client_writeUserExecutableAttribute(UA_Client *client, const UA_NodeId nodeId
  * Method Calling
  * ^^^^^^^^^^^^^^ */
 
-#ifdef UA_ENABLE_METHODCALLS
 UA_StatusCode UA_EXPORT
-UA_Client_call(UA_Client *client, const UA_NodeId objectId,
-               const UA_NodeId methodId, size_t inputSize, const UA_Variant *input,
+UA_Client_call(UA_Client *client,
+               const UA_NodeId objectId, const UA_NodeId methodId,
+               size_t inputSize, const UA_Variant *input,
                size_t *outputSize, UA_Variant **output);
-#endif
 
 /**
  * Node Management
@@ -486,23 +506,6 @@ UA_Client_deleteReference(UA_Client *client, const UA_NodeId sourceNodeId,
 UA_StatusCode UA_EXPORT
 UA_Client_deleteNode(UA_Client *client, const UA_NodeId nodeId,
                      UA_Boolean deleteTargetReferences);
-
-/* Protect against redundant definitions for server/client */
-#ifndef UA_DEFAULT_ATTRIBUTES_DEFINED
-#define UA_DEFAULT_ATTRIBUTES_DEFINED
-/* The default for variables is "BaseDataType" for the datatype, -2 for the
- * valuerank and a read-accesslevel. */
-UA_EXPORT extern const UA_VariableAttributes UA_VariableAttributes_default;
-UA_EXPORT extern const UA_VariableTypeAttributes UA_VariableTypeAttributes_default;
-/* Methods are executable by default */
-UA_EXPORT extern const UA_MethodAttributes UA_MethodAttributes_default;
-/* The remaining attribute definitions are currently all zeroed out */
-UA_EXPORT extern const UA_ObjectAttributes UA_ObjectAttributes_default;
-UA_EXPORT extern const UA_ObjectTypeAttributes UA_ObjectTypeAttributes_default;
-UA_EXPORT extern const UA_ReferenceTypeAttributes UA_ReferenceTypeAttributes_default;
-UA_EXPORT extern const UA_DataTypeAttributes UA_DataTypeAttributes_default;
-UA_EXPORT extern const UA_ViewAttributes UA_ViewAttributes_default;
-#endif
 
 /* Don't call this function, use the typed versions */
 UA_StatusCode UA_EXPORT
@@ -646,14 +649,16 @@ UA_Client_NamespaceGetIndex(UA_Client *client, UA_String *namespaceUri,
 #ifndef HAVE_NODEITER_CALLBACK
 #define HAVE_NODEITER_CALLBACK
 /* Iterate over all nodes referenced by parentNodeId by calling the callback
-   function for each child node */
-typedef UA_StatusCode (*UA_NodeIteratorCallback)(UA_NodeId childId, UA_Boolean isInverse,
-                                                 UA_NodeId referenceTypeId, void *handle);
+ * function for each child node */
+typedef UA_StatusCode
+(*UA_NodeIteratorCallback)(UA_NodeId childId, UA_Boolean isInverse,
+                           UA_NodeId referenceTypeId, void *handle);
 #endif
 
 UA_StatusCode UA_EXPORT
-UA_Client_forEachChildNodeCall(UA_Client *client, UA_NodeId parentNodeId,
-                               UA_NodeIteratorCallback callback, void *handle);
+UA_Client_forEachChildNodeCall(
+    UA_Client *client, UA_NodeId parentNodeId,
+    UA_NodeIteratorCallback callback, void *handle);
 
 _UA_END_DECLS
 

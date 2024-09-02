@@ -5,10 +5,10 @@
  * Copyright (c) 2019 Kalycito Infotech Private Limited
  */
 
-#include <open62541/plugin/pubsub_ethernet.h>
 #include <open62541/server_config_default.h>
 #include <open62541/server_pubsub.h>
 #include <check.h>
+#include <stdlib.h>
 
 #include "ua_pubsub.h"
 #include "ua_server_internal.h"
@@ -33,9 +33,9 @@ UA_NodeId connection_test;
 static void setup(void) {
     /*Add setup by creating new server with valid configuration */
     server = UA_Server_new();
+    ck_assert(server != NULL);
     config = UA_Server_getConfig(server);
     UA_ServerConfig_setMinimal(config, UA_SUBSCRIBER_PORT, NULL);
-    UA_ServerConfig_addPubSubTransportLayer(config, UA_PubSubTransportLayerEthernet());
     UA_Server_run_startup(server);
 }
 
@@ -58,7 +58,8 @@ START_TEST(EthernetSendWithoutVLANTag) {
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri = UA_STRING(TRANSPORT_PROFILE_URI);
-    connectionConfig.publisherId.numeric = PUBLISHER_ID;
+    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT16;
+    connectionConfig.publisherId.uint16 = PUBLISHER_ID;
     UA_Server_addPubSubConnection(server, &connectionConfig, &connection_test);
     connection = UA_PubSubConnection_findConnectionbyId(server, connection_test);
     /* Remove the connection if invalid*/
@@ -69,10 +70,13 @@ START_TEST(EthernetSendWithoutVLANTag) {
     /* Initialize a buffer to send data */
     testBuffer = UA_STRING(BUFFER_STRING);
     /* Validate the Ethernet send API */
-    retVal = connection->channel->send(connection->channel, NULL, &testBuffer);
+    retVal = connection->cm->sendWithConnection(connection->cm, connection->sendChannel,
+                                                &UA_KEYVALUEMAP_NULL, &testBuffer);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 
-    } END_TEST
+    UA_Server_run_iterate(server, false);
+}
+END_TEST
 
 START_TEST(EthernetSendWithVLANTag) {
     UA_StatusCode retVal = UA_STATUSCODE_GOOD;
@@ -86,7 +90,8 @@ START_TEST(EthernetSendWithVLANTag) {
     UA_Variant_setScalar(&connectionConfig.address, &networkAddressUrl,
                          &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE]);
     connectionConfig.transportProfileUri = UA_STRING(TRANSPORT_PROFILE_URI);
-    connectionConfig.publisherId.numeric = PUBLISHER_ID;
+    connectionConfig.publisherIdType = UA_PUBLISHERIDTYPE_UINT16;
+    connectionConfig.publisherId.uint16 = PUBLISHER_ID;
     UA_Server_addPubSubConnection(server, &connectionConfig, &connection_test);
     connection = UA_PubSubConnection_findConnectionbyId(server, connection_test);
     /* Remove the connection if invalid*/
@@ -97,11 +102,12 @@ START_TEST(EthernetSendWithVLANTag) {
     /* Initialize a buffer to send data */
     testBuffer = UA_STRING(BUFFER_STRING);
     /* Validate the Ethernet send API */
-    retVal = connection->channel->send(connection->channel, NULL, &testBuffer);
+    retVal = connection->cm->sendWithConnection(connection->cm, connection->sendChannel,
+                                                &UA_KEYVALUEMAP_NULL, &testBuffer);
     ck_assert_int_eq(retVal, UA_STATUSCODE_GOOD);
 
-    } END_TEST
-
+    UA_Server_run_iterate(server, false);
+} END_TEST
 
 int main(void) {
     /*Test case to run both publisher*/

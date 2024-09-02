@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this 
@@ -53,6 +53,8 @@ def last_line(c):
     "Searches for the latest ifdef (closing the include guard)"
     reg = re.compile("^#ifdef")
     for i in range(len(c)-1,1,-1):
+        if "stop-doc-generation" in c[i]:
+            return i
         if "_UA_END_DECLS" in c[i]:
             reg = re.compile("^_UA_END_DECLS")
     last = 1

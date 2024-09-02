@@ -11,14 +11,17 @@
 #include "tests/namespace_tests_testnodeset_generated.h"
 #include "tests/types_tests_testnodeset_generated_handling.h"
 #include "namespace_tests_di_generated.h"
+#include <limits.h>
 #include "unistd.h"
+#include <stdlib.h>
 
 UA_Server *server = NULL;
-UA_DataTypeArray customTypesArray = { NULL, UA_TYPES_TESTS_TESTNODESET_COUNT, UA_TYPES_TESTS_TESTNODESET};
+UA_DataTypeArray customTypesArray = { NULL, UA_TYPES_TESTS_TESTNODESET_COUNT, UA_TYPES_TESTS_TESTNODESET, UA_FALSE};
 UA_UInt16 testNamespaceIndex = (UA_UInt16) -1;
 
 static void setup(void) {
     server = UA_Server_new();
+    ck_assert(server != NULL);
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
     config->customDataTypes = &customTypesArray;
@@ -33,9 +36,9 @@ static void teardown(void) {
 START_TEST(Server_addTestNodeset) {
     UA_StatusCode retval = namespace_tests_testnodeset_generated(server);
     ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
-    size_t nsIndex = (size_t) -1;
-    UA_Server_getNamespaceByName(server, UA_STRING("http://yourorganisation.org/test/"), &nsIndex);
-    ck_assert(nsIndex != (size_t)-1);
+    size_t nsIndex = LONG_MAX;
+    retval = UA_Server_getNamespaceByName(server, UA_STRING("http://yourorganisation.org/test/"), &nsIndex);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_GOOD);
     testNamespaceIndex = (UA_UInt16) nsIndex;
 }
 END_TEST
@@ -90,7 +93,8 @@ START_TEST(check1dimValues) {
     // Point_1dim_noInit
     UA_Server_readValue(server, UA_NODEID_NUMERIC(testNamespaceIndex, 10007), &out);
     ck_assert(!UA_Variant_isScalar(&out));
-    ck_assert(out.arrayDimensionsSize == 1);
+    ck_assert(out.arrayDimensionsSize == 0);
+    ck_assert(out.arrayDimensions == NULL);
     UA_Variant_clear(&out);
     // Point_1dim_init
     UA_Server_readValue(server, UA_NODEID_NUMERIC(testNamespaceIndex, 10004), &out);
@@ -189,8 +193,8 @@ START_TEST(checkGuid) {
     ck_assert(out.type == &UA_TYPES[UA_TYPES_GUID]);
     ck_assert(out.arrayLength == 3);
     UA_Guid *ArrayData = (UA_Guid *)out.data;
-    UA_Guid ArrayGuidVal[3] = {UA_GUID("7822a391-1111-4a59-b08d-b70bc63fecec"), 
-                               UA_GUID("7822a391-2222-4a59-b08d-b70bc63fecec"), 
+    UA_Guid ArrayGuidVal[3] = {UA_GUID("7822a391-1111-4a59-b08d-b70bc63fecec"),
+                               UA_GUID("7822a391-2222-4a59-b08d-b70bc63fecec"),
                                UA_GUID("7822a391-3333-4a59-b08d-b70bc63fecec")};
     ck_assert(UA_Guid_equal(&ArrayData[0], &ArrayGuidVal[0]));
     ck_assert(UA_Guid_equal(&ArrayData[1], &ArrayGuidVal[1]));

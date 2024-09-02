@@ -165,24 +165,24 @@ asym_getRemoteSignatureSize_sp_basic256sha256(const Basic256Sha256_ChannelContex
 
 static size_t
 asym_getRemoteBlockSize_sp_basic256sha256(const Basic256Sha256_ChannelContext *cc) {
+    if(cc == NULL)
+        return 0;
 #if MBEDTLS_VERSION_NUMBER >= 0x02060000 && MBEDTLS_VERSION_NUMBER < 0x03000000
     mbedtls_rsa_context *const rsaContext = mbedtls_pk_rsa(cc->remoteCertificate.pk);
     return rsaContext->len;
 #else
-    if(cc == NULL)
-        return 0;
     return mbedtls_rsa_get_len(mbedtls_pk_rsa(cc->remoteCertificate.pk));
 #endif
 }
 
 static size_t
 asym_getRemotePlainTextBlockSize_sp_basic256sha256(const Basic256Sha256_ChannelContext *cc) {
+    if(cc == NULL)
+        return 0;
 #if MBEDTLS_VERSION_NUMBER >= 0x02060000 && MBEDTLS_VERSION_NUMBER < 0x03000000
     mbedtls_rsa_context *const rsaContext = mbedtls_pk_rsa(cc->remoteCertificate.pk);
     return rsaContext->len - UA_SECURITYPOLICY_BASIC256SHA256_RSAPADDING_LEN;
 #else
-    if(cc == NULL)
-        return 0;
     return mbedtls_rsa_get_len(mbedtls_pk_rsa(cc->remoteCertificate.pk)) -
         UA_SECURITYPOLICY_BASIC256SHA256_RSAPADDING_LEN;
 #endif
@@ -212,7 +212,7 @@ asym_decrypt_sp_basic256sha256(Basic256Sha256_ChannelContext *cc,
     if(cc == NULL || data == NULL)
         return UA_STATUSCODE_BADINTERNALERROR;
     return mbedtls_decrypt_rsaOaep(&cc->policyContext->localPrivateKey,
-                                   &cc->policyContext->drbgContext, data);
+                                   &cc->policyContext->drbgContext, data, MBEDTLS_MD_SHA1);
 }
 
 static size_t
@@ -415,13 +415,12 @@ parseRemoteCertificate_sp_basic256sha256(Basic256Sha256_ChannelContext *cc,
     /* Check the key length */
 #if MBEDTLS_VERSION_NUMBER >= 0x02060000 && MBEDTLS_VERSION_NUMBER < 0x03000000
     mbedtls_rsa_context *rsaContext = mbedtls_pk_rsa(cc->remoteCertificate.pk);
-    if(rsaContext->len < UA_SECURITYPOLICY_BASIC256SHA256_MINASYMKEYLENGTH ||
-       rsaContext->len > UA_SECURITYPOLICY_BASIC256SHA256_MAXASYMKEYLENGTH)
+    size_t keylen = rsaContext->len;
 #else
     size_t keylen = mbedtls_rsa_get_len(mbedtls_pk_rsa(cc->remoteCertificate.pk));
+#endif
     if(keylen < UA_SECURITYPOLICY_BASIC256SHA256_MINASYMKEYLENGTH ||
        keylen > UA_SECURITYPOLICY_BASIC256SHA256_MAXASYMKEYLENGTH)
-#endif
         return UA_STATUSCODE_BADCERTIFICATEUSENOTALLOWED;
 
     return UA_STATUSCODE_GOOD;
@@ -773,7 +772,7 @@ UA_SecurityPolicy_Basic256Sha256(UA_SecurityPolicy *policy, const UA_ByteString 
     UA_SecurityPolicySignatureAlgorithm *sym_signatureAlgorithm =
         &symmetricModule->cryptoModule.signatureAlgorithm;
     sym_signatureAlgorithm->uri =
-        UA_STRING("http://www.w3.org/2000/09/xmldsig#hmac-sha1\0");
+        UA_STRING("http://www.w3.org/2000/09/xmldsig#hmac-sha2-256\0");
     sym_signatureAlgorithm->verify =
         (UA_StatusCode (*)(void *, const UA_ByteString *, const UA_ByteString *))sym_verify_sp_basic256sha256;
     sym_signatureAlgorithm->sign =

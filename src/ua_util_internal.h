@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. 
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  *
  *    Copyright 2014-2017 (c) Fraunhofer IOSB (Author: Julius Pfrommer)
  *    Copyright 2014, 2017 (c) Florian Palm
@@ -27,56 +27,26 @@ _UA_BEGIN_DECLS
 /* Macro-Expand for MSVC workarounds */
 #define UA_MACRO_EXPAND(x) x
 
+/* Try if the type of the value can be adjusted "in situ" to the target type.
+ * That can be done, for example, to map between int32 and an enum. */
+void
+adjustType(UA_Variant *value, const UA_DataType *targetType);
+
 /* Print a NodeId in logs */
-#define UA_LOG_NODEID_INTERNAL(NODEID, LOG)          \
-    do {                                             \
-    UA_String nodeIdStr = UA_STRING_NULL;            \
-    UA_NodeId_print(NODEID, &nodeIdStr);             \
-    LOG;                                             \
-    UA_String_clear(&nodeIdStr);                     \
-    } while(0)
+#define UA_LOG_NODEID_INTERNAL(NODEID, LEVEL, LOG)   \
+    if(UA_LOGLEVEL <= UA_LOGLEVEL_##LEVEL) {         \
+        UA_String nodeIdStr = UA_STRING_NULL;        \
+        UA_NodeId_print(NODEID, &nodeIdStr);         \
+        LOG;                                         \
+        UA_String_clear(&nodeIdStr);                 \
+    }
 
-#if UA_LOGLEVEL <= 100
-# define UA_LOG_NODEID_TRACE(NODEID, LOG)       \
-    UA_LOG_NODEID_INTERNAL(NODEID, LOG)
-#else
-# define UA_LOG_NODEID_TRACE(NODEID, LOG)
-#endif
-
-#if UA_LOGLEVEL <= 200
-# define UA_LOG_NODEID_DEBUG(NODEID, LOG)       \
-    UA_LOG_NODEID_INTERNAL(NODEID, LOG)
-#else
-# define UA_LOG_NODEID_DEBUG(NODEID, LOG)
-#endif
-
-#if UA_LOGLEVEL <= 300
-# define UA_LOG_NODEID_INFO(NODEID, LOG)       \
-    UA_LOG_NODEID_INTERNAL(NODEID, LOG)
-#else
-# define UA_LOG_NODEID_INFO(NODEID, LOG)
-#endif
-
-#if UA_LOGLEVEL <= 400
-# define UA_LOG_NODEID_WARNING(NODEID, LOG)     \
-    UA_LOG_NODEID_INTERNAL(NODEID, LOG)
-#else
-# define UA_LOG_NODEID_WARNING(NODEID, LOG)
-#endif
-
-#if UA_LOGLEVEL <= 500
-# define UA_LOG_NODEID_ERROR(NODEID, LOG)       \
-    UA_LOG_NODEID_INTERNAL(NODEID, LOG)
-#else
-# define UA_LOG_NODEID_ERROR(NODEID, LOG)
-#endif
-
-#if UA_LOGLEVEL <= 600
-# define UA_LOG_NODEID_FATAL(NODEID, LOG)       \
-    UA_LOG_NODEID_INTERNAL(NODEID, LOG)
-#else
-# define UA_LOG_NODEID_FATAL(NODEID, LOG)
-#endif
+#define UA_LOG_NODEID_TRACE(NODEID, LOG) UA_LOG_NODEID_INTERNAL(NODEID, TRACE, LOG)
+#define UA_LOG_NODEID_DEBUG(NODEID, LOG) UA_LOG_NODEID_INTERNAL(NODEID, DEBUG, LOG)
+#define UA_LOG_NODEID_INFO(NODEID, LOG) UA_LOG_NODEID_INTERNAL(NODEID, INFO, LOG)
+#define UA_LOG_NODEID_WARNING(NODEID, LOG) UA_LOG_NODEID_INTERNAL(NODEID, WARNING, LOG)
+#define UA_LOG_NODEID_ERROR(NODEID, LOG) UA_LOG_NODEID_INTERNAL(NODEID, ERROR, LOG)
+#define UA_LOG_NODEID_FATAL(NODEID, LOG) UA_LOG_NODEID_INTERNAL(NODEID, FATAL, LOG)
 
 /* Short names for integer. These are not exposed on the public API, since many
  * user-applications make the same definitions in their headers. */
@@ -125,13 +95,13 @@ isTrue(uint8_t expr) {
 #ifdef UA_DEBUG_FILE_LINE_INFO
 #define UA_CHECK_LOG_INTERNAL(A, STATUSCODE, EVAL, LOG, LOGGER, CAT, MSG, ...)           \
     UA_MACRO_EXPAND(                                                                     \
-        UA_CHECK(A, LOG(LOGGER, CAT, "" MSG "%s (%s:%d: statuscode: %s)", __VA_ARGS__,   \
+        UA_CHECK(A, LOG(LOGGER, CAT, "" MSG "%s (%s:%d: StatusCode: %s)", __VA_ARGS__,   \
                         __FILE__, __LINE__, UA_StatusCode_name(STATUSCODE));             \
                  EVAL))
 #else
 #define UA_CHECK_LOG_INTERNAL(A, STATUSCODE, EVAL, LOG, LOGGER, CAT, MSG, ...)           \
     UA_MACRO_EXPAND(                                                                     \
-        UA_CHECK(A, LOG(LOGGER, CAT, "" MSG "%s (statuscode: %s)", __VA_ARGS__,   \
+        UA_CHECK(A, LOG(LOGGER, CAT, "" MSG "%s (StatusCode: %s)", __VA_ARGS__,   \
                         UA_StatusCode_name(STATUSCODE));             \
                  EVAL))
 #endif
@@ -185,6 +155,9 @@ isTrue(uint8_t expr) {
 #define UA_CHECK_STATUS_INFO(STATUSCODE, EVAL, LOGGER, CAT, ...)                         \
     UA_MACRO_EXPAND(                                                                     \
         UA_CHECK_STATUS_LOG(STATUSCODE, EVAL, INFO, LOGGER, CAT, __VA_ARGS__))
+#define UA_CHECK_STATUS_DEBUG(STATUSCODE, EVAL, LOGGER, CAT, ...)                         \
+    UA_MACRO_EXPAND(                                                                     \
+        UA_CHECK_STATUS_LOG(STATUSCODE, EVAL, DEBUG, LOGGER, CAT, __VA_ARGS__))
 
 #define UA_CHECK_MEM_FATAL(PTR, EVAL, LOGGER, CAT, ...)                        \
     UA_MACRO_EXPAND(                                                                     \
@@ -203,9 +176,18 @@ isTrue(uint8_t expr) {
  * Utility Functions
  * ----------------- */
 
-const UA_DataType *
-UA_findDataTypeWithCustom(const UA_NodeId *typeId,
-                          const UA_DataTypeArray *customTypes);
+#ifdef UA_ENABLE_DISCOVERY_SEMAPHORE
+# ifdef _WIN32
+#  include <io.h>
+#  define UA_fileExists(X) ( _access(X, 0) == 0)
+# else
+#  include <unistd.h>
+#  define UA_fileExists(X) ( access(X, 0) == 0)
+# endif
+#endif
+
+void
+UA_cleanupDataTypeWithCustom(const UA_DataTypeArray *customTypes);
 
 /* Get the number of optional fields contained in an structure type */
 size_t UA_EXPORT
@@ -216,6 +198,10 @@ getCountOfOptionalFields(const UA_DataType *type);
 void UA_EXPORT
 UA_dump_hex_pkg(UA_Byte* buffer, size_t bufferLen);
 #endif
+
+/* Get pointer to leaf certificate of a specified valid chain of DER encoded
+ * certificates */
+UA_ByteString getLeafCertificate(UA_ByteString chain);
 
 /* Unions that represent any of the supported request or response message */
 typedef union {
@@ -320,6 +306,9 @@ UA_String_equal_ignorecase(const UA_String *s1, const UA_String *s2);
 /********************/
 /* Encoding Helpers */
 /********************/
+
+/* out must be a buffer with at least 36 elements, the length of every guid */
+void UA_Guid_to_hex(const UA_Guid *guid, u8* out, UA_Boolean lower);
 
 #define UA_ENCODING_HELPERS(TYPE, UPCASE_TYPE)                          \
     static UA_INLINE size_t                                             \
