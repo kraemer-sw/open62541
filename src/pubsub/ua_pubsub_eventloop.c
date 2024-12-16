@@ -253,9 +253,14 @@ PubSubChannelCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
     }
 
     if(!processed) {
-        UA_LOG_WARNING_CONNECTION(server->config.logging, psc,
-                                  "Message received that could not be processed. "
-                                  "Check PublisherID, WriterGroupID and DatasetWriterID.");
+        UA_DateTime nowM = UA_DateTime_nowMonotonic();
+        if(psc->silenceErrorUntil < nowM) {
+            UA_LOG_WARNING_CONNECTION(server->config.logging, psc,
+                                      "Message received that could not be processed. "
+                                      "Check PublisherID, WriterGroupID and DatasetWriterID. "
+                                      "(This error is now silenced for 10s.)");
+            psc->silenceErrorUntil = nowM + (UA_DateTime)(10.0 * UA_DATETIME_SEC);
+        }
     }
 
     UA_UNLOCK(&server->serviceMutex);
@@ -721,7 +726,9 @@ UA_WriterGroup_disconnect(UA_WriterGroup *wg) {
     if(wg->sendChannel == 0)
         return;
     UA_PubSubConnection *c = wg->linkedConnection;
-    c->cm->closeConnection(c->cm, c->sendChannel);
+    if(!c || !c->cm)
+        return;
+    c->cm->closeConnection(c->cm, wg->sendChannel);
 }
 
 UA_StatusCode

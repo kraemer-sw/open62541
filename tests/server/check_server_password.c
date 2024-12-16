@@ -144,6 +144,7 @@ static void setup(void) {
     ck_assert_msg(server, "UA_Server_new");
     UA_ServerConfig *config = UA_Server_getConfig(server);
     UA_ServerConfig_setDefault(config);
+    config->allowNonePolicyPassword = true;
     UA_String policy = UA_STRING_STATIC("http://opcfoundation.org/UA/SecurityPolicy#None");
     UA_UsernamePasswordLogin login[] = {
         { UA_STRING_STATIC("user"),
@@ -231,7 +232,7 @@ START_TEST(Password_none) {
     UA_ClientConfig_setDefault(config);
 
     UA_StatusCode retval = UA_Client_connect(client, "opc.tcp://localhost:4840");
-    ck_assert_uint_eq(retval, UA_STATUSCODE_BADIDENTITYTOKENINVALID);
+    ck_assert_uint_eq(retval, UA_STATUSCODE_BADIDENTITYTOKENREJECTED);
     UA_Client_disconnect(client);
     UA_Client_delete(client);
 } END_TEST

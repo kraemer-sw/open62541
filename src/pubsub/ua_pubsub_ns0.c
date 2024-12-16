@@ -380,22 +380,64 @@ addWriterGroupConfig(UA_Server *server, UA_NodeId connectionId,
     writerGroupConfig.publishingInterval = writerGroup->publishingInterval;
     writerGroupConfig.enabled = writerGroup->enabled;
     writerGroupConfig.writerGroupId = writerGroup->writerGroupId;
-    //TODO remove hard coded UADP
-    writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_UADP;
     writerGroupConfig.priority = writerGroup->priority;
 
-    UA_UadpWriterGroupMessageDataType writerGroupMessage;
     UA_ExtensionObject *eoWG = &writerGroup->messageSettings;
+    UA_UadpWriterGroupMessageDataType uadpWriterGroupMessage;
+    UA_JsonWriterGroupMessageDataType jsonWriterGroupMessage;
     if(eoWG->encoding == UA_EXTENSIONOBJECT_DECODED){
         writerGroupConfig.messageSettings.encoding  = UA_EXTENSIONOBJECT_DECODED;
         if(eoWG->content.decoded.type == &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE]){
-            if(UA_UadpWriterGroupMessageDataType_copy((UA_UadpWriterGroupMessageDataType *) eoWG->content.decoded.data,
-                                                        &writerGroupMessage) != UA_STATUSCODE_GOOD){
+            writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_UADP;
+            if(UA_UadpWriterGroupMessageDataType_copy(
+                    (UA_UadpWriterGroupMessageDataType *)eoWG->content.decoded.data,
+                    &uadpWriterGroupMessage) != UA_STATUSCODE_GOOD) {
                 return UA_STATUSCODE_BADOUTOFMEMORY;
             }
             writerGroupConfig.messageSettings.content.decoded.type = &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE];
-            writerGroupConfig.messageSettings.content.decoded.data = &writerGroupMessage;
+            writerGroupConfig.messageSettings.content.decoded.data = &uadpWriterGroupMessage;
+        } else if(eoWG->content.decoded.type == &UA_TYPES[UA_TYPES_JSONWRITERGROUPMESSAGEDATATYPE]) {
+            writerGroupConfig.encodingMimeType = UA_PUBSUB_ENCODING_JSON;
+            if(UA_JsonWriterGroupMessageDataType_copy(
+                   (UA_JsonWriterGroupMessageDataType *)eoWG->content.decoded.data,
+                   &jsonWriterGroupMessage) != UA_STATUSCODE_GOOD) {
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            }
+            writerGroupConfig.messageSettings.content.decoded.type = &UA_TYPES[UA_TYPES_JSONWRITERGROUPMESSAGEDATATYPE];
+            writerGroupConfig.messageSettings.content.decoded.data = &jsonWriterGroupMessage;
         }
+    }
+
+    eoWG = &writerGroup->transportSettings;
+    UA_BrokerWriterGroupTransportDataType brokerWriterGroupTransport;
+    UA_DatagramWriterGroupTransportDataType datagramWriterGroupTransport;
+    if(eoWG->encoding == UA_EXTENSIONOBJECT_DECODED) {
+        writerGroupConfig.transportSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
+        if(eoWG->content.decoded.type == &UA_TYPES[UA_TYPES_BROKERWRITERGROUPTRANSPORTDATATYPE]) {
+            if(UA_BrokerWriterGroupTransportDataType_copy(
+                    (UA_BrokerWriterGroupTransportDataType*)eoWG->content.decoded.data,
+                    &brokerWriterGroupTransport) != UA_STATUSCODE_GOOD) {
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            }
+            writerGroupConfig.transportSettings.content.decoded.type = &UA_TYPES[UA_TYPES_BROKERWRITERGROUPTRANSPORTDATATYPE];
+            writerGroupConfig.transportSettings.content.decoded.data = &brokerWriterGroupTransport;
+        } else if(eoWG->content.decoded.type == &UA_TYPES[UA_TYPES_DATAGRAMWRITERGROUPTRANSPORTDATATYPE]) {
+            if(UA_DatagramWriterGroupTransportDataType_copy(
+                   (UA_DatagramWriterGroupTransportDataType *)eoWG->content.decoded.data,
+                   &datagramWriterGroupTransport) != UA_STATUSCODE_GOOD) {
+                return UA_STATUSCODE_BADOUTOFMEMORY;
+            }
+            writerGroupConfig.transportSettings.content.decoded.type = &UA_TYPES[UA_TYPES_DATAGRAMWRITERGROUPTRANSPORTDATATYPE];
+            writerGroupConfig.transportSettings.content.decoded.data = &datagramWriterGroupTransport;
+        }
+    }
+    if (writerGroupConfig.encodingMimeType == UA_PUBSUB_ENCODING_JSON
+        && (writerGroupConfig.transportSettings.encoding != UA_EXTENSIONOBJECT_DECODED ||
+        writerGroupConfig.transportSettings.content.decoded.type !=
+            &UA_TYPES[UA_TYPES_BROKERWRITERGROUPTRANSPORTDATATYPE])) {
+        UA_LOG_ERROR(server->config.logging, UA_LOGCATEGORY_SERVER,
+                     "JSON encoding is supported only for MQTT transport");
+        return UA_STATUSCODE_BADCONFIGURATIONERROR;
     }
 
     return UA_WriterGroup_create(server, connectionId, &writerGroupConfig, writerGroupId);
@@ -1312,6 +1354,26 @@ writeContentMask(UA_Server *server, const UA_NodeId *sessionId,
     return UA_STATUSCODE_GOOD;
 }
 
+static UA_StatusCode
+readGroupVersion(UA_Server *server, const UA_NodeId *sessionId,
+                void *sessionContext, const UA_NodeId *nodeId,
+                void *nodeContext, UA_Boolean includeSourceTimeStamp,
+                const UA_NumericRange *range, UA_DataValue *value) {
+    UA_WriterGroup *writerGroup = (UA_WriterGroup*)nodeContext;
+    if((writerGroup->config.messageSettings.encoding != UA_EXTENSIONOBJECT_DECODED &&
+        writerGroup->config.messageSettings.encoding != UA_EXTENSIONOBJECT_DECODED_NODELETE) ||
+       writerGroup->config.messageSettings.content.decoded.type !=
+       &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE])
+        return UA_STATUSCODE_BADINTERNALERROR;
+    UA_UadpWriterGroupMessageDataType *wgm = (UA_UadpWriterGroupMessageDataType*)
+        writerGroup->config.messageSettings.content.decoded.data;
+
+    UA_Variant_setScalarCopy(&value->value, &wgm->groupVersion,
+                             &UA_TYPES[UA_DATATYPEKIND_UINT32]);
+    value->hasValue = true;
+    return UA_STATUSCODE_GOOD;
+}
+
 UA_StatusCode
 addWriterGroupRepresentation(UA_Server *server, UA_WriterGroup *writerGroup) {
     UA_LOCK_ASSERT(&server->serviceMutex, 1);
@@ -1409,6 +1471,22 @@ addWriterGroupRepresentation(UA_Server *server, UA_WriterGroup *writerGroup) {
         /* Make writable */
         writeAccessLevelAttribute(server, contentMaskId,
                                   UA_ACCESSLEVELMASK_WRITE | UA_ACCESSLEVELMASK_READ);
+
+    }
+    UA_NodeId groupVersionId =
+        findSingleChildNode(server, UA_QUALIFIEDNAME(0, "GroupVersion"),
+                            UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY), messageSettingsId);
+    if(!UA_NodeId_isNull(&groupVersionId)) {
+        /* Set the callback */
+        UA_DataSource ds;
+        ds.read = readGroupVersion;
+        ds.write = NULL;
+        setVariableNode_dataSource(server, groupVersionId, ds);
+        setNodeContext(server, groupVersionId, writerGroup);
+
+        /* Read only */
+        writeAccessLevelAttribute(server, groupVersionId,
+                                  UA_ACCESSLEVELMASK_READ);
 
     }
 
